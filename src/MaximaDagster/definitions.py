@@ -1,7 +1,8 @@
-from dagster import Definitions, define_asset_job, fs_io_manager
+from dagster import Definitions, define_asset_job
 from .resources import GirderClient
 from .assets import *
 from .sensors import xrd_experiment_sensor, xrd_calibration_sensor
+from .io_managers import sanitized_fs_io_manager
 
 
 xrd = define_asset_job(
@@ -25,6 +26,6 @@ defs = Definitions(
                 "api_key": {"env": "GIRDER_API_KEY"},
             }
         ),
-        "io_manager": fs_io_manager,
+        "io_manager": sanitized_fs_io_manager,
     },
 )

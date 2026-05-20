@@ -14,7 +14,7 @@ class _NoopGirderClient:
 
 
 def test_active_poni_retries_on_cache_miss(monkeypatch) -> None:
-    monkeypatch.setattr(assets, "_get_target_calibrant_file_id", lambda gc, partition_key: "cal_1")
+    monkeypatch.setattr(assets, "_get_target_calibrant_item_id", lambda gc, partition_key: "cal_1")
     monkeypatch.setattr(assets.CalibrationCache, "get_entry_for_calibrant", lambda self, *args, **kwargs: None)
 
     context = build_asset_context(
@@ -40,7 +40,7 @@ def test_active_poni_returns_cached_payload_on_cache_hit(monkeypatch) -> None:
     )
     geometry = SimpleNamespace(dist=1.0)
 
-    monkeypatch.setattr(assets, "_get_target_calibrant_file_id", lambda gc, partition_key: "cal_9")
+    monkeypatch.setattr(assets, "_get_target_calibrant_item_id", lambda gc, partition_key: "cal_9")
     monkeypatch.setattr(assets.CalibrationCache, "get_entry_for_calibrant", lambda self, *args, **kwargs: cache_entry)
     monkeypatch.setattr(assets, "load_geometry_from_poni", lambda path: geometry)
 

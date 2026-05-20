@@ -91,35 +91,6 @@ def test_xrd_raw_preserves_igsn_and_source_shape(tmp_path, monkeypatch) -> None:
     assert result["scans"][0]["source_item_ids"] == ["item_1"]
 
 
-# def test_xrd_raw_conflicting_igsn_for_same_scan_fails_fast(tmp_path, monkeypatch) -> None:
-#     monkeypatch.chdir(tmp_path)
-#     h5_path = tmp_path / "scan.h5"
-#     _write_test_h5(h5_path)
-
-#     rows = [
-#         {
-#             "_modelType": "item",
-#             "_id": "item_1",
-#             "name": "scan_point_0_data_00001.h5",
-#             "folderId": "raw_01",
-#             "meta": {"igsn": "IGSN-A"},
-#         },
-#         {
-#             "_modelType": "item",
-#             "_id": "item_2",
-#             "name": "scan_point_0_data_00001.h5",
-#             "folderId": "raw_01",
-#             "meta": {"igsn": "IGSN-B"},
-#         },
-#     ]
-#     gc = _XrdRawClient(h5_path=h5_path, detail_rows=rows)
-
-#     context = build_asset_context(resources={"GirderClient": gc}, partition_key="exp_01")
-
-#     with pytest.raises(ValueError, match="Conflicting IGSN"):
-#         assets.xrd_raw(context)
-
-
 def test_azimuthal_integration_uploads_exact_metadata_shape(monkeypatch) -> None:
     monkeypatch.setenv("GIRDER_API_URL", "https://girder.example/api/v1")
 
@@ -170,12 +141,12 @@ def test_azimuthal_integration_uploads_exact_metadata_shape(monkeypatch) -> None
     first = uploaded[0]["metadata"]
     second = uploaded[1]["metadata"]
 
-    assert set(first.keys()) == {"prov", "poni", "dataType", "igsn"}
-    assert set(second.keys()) == {"prov", "poni", "dataType"}
+    assert set(first.keys()) == {"prov", "poni", "data_type", "igsn"}
+    assert set(second.keys()) == {"prov", "poni", "data_type"}
 
     assert set(first["prov"].keys()) == {"workflow_version", "run_id", "time"}
     assert first["prov"]["run_id"] == "run_123"
-    assert first["dataType"] == "xrd_derived"
+    assert first["data_type"] == "xrd_derived"
     assert first["igsn"] == "IGSN-123"
 
     assert set(first["poni"].keys()) == {"item_id", "link", "geometry"}
@@ -234,7 +205,7 @@ def test_poni_uploads_exact_metadata_shape(tmp_path, monkeypatch) -> None:
     )
 
     metadata = captured["metadata"]
-    assert set(metadata.keys()) == {"prov", "model", "calibrant", "dataType"}
+    assert set(metadata.keys()) == {"prov", "model", "calibrant", "data_type"}
     assert set(metadata["prov"].keys()) == {"workflow_version", "run_id", "time"}
     assert metadata["prov"]["run_id"] == "run_poni"
     assert set(metadata["model"].keys()) == {"version", "item_id", "link"}
@@ -249,7 +220,7 @@ def test_poni_uploads_exact_metadata_shape(tmp_path, monkeypatch) -> None:
         "link": "https://girder.example/#item/cal_item_1",
         "igsn": "CAL-IGSN-1",
     }
-    assert metadata["dataType"] == "xrd_calibrant_derived"
+    assert metadata["data_type"] == "xrd_calibrant_derived"
 
     assert set(result.keys()) == {"poni_path", "poni_item_id"}
     assert result["poni_item_id"] == "poni_item_1"

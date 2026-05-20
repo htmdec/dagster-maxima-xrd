@@ -11,6 +11,8 @@ from dagster import (
 )
 
 from .utils.discovery import (
+    get_base_parent_id,
+    get_base_parent_type,
     call_with_retries,
     fetch_partitions
 )
@@ -83,12 +85,16 @@ def build_girder_partition_sensor(
     def _generic_sensor(context: SensorEvaluationContext, GirderClient=None):
         gc = GirderClient or context.resources.GirderClient
 
+        base_id = get_base_parent_id()
+        base_type = get_base_parent_type()
         since, checksums_by_partition = _parse_girder_cursor(context.cursor)
         poll_since = since or _default_since()
 
         partition_updates = call_with_retries(
             fetch_partitions,
             gc,
+            base_id=base_id,
+            base_type=base_type,
             data_type=data_type,
             since=poll_since,
         )

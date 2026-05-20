@@ -36,8 +36,8 @@ class DatafilesDiscoveryError(RuntimeError):
     pass
 
 
-def get_datafiles_retry_count() -> int:
-    raw = str(os.getenv("DISCOVERY_DATAFILES_RETRY_COUNT", "2")).strip()
+def get_retry_count() -> int:
+    raw = str(os.getenv("DISCOVERY_RETRY_COUNT", "2")).strip()
     try:
         value = int(raw)
     except ValueError:
@@ -45,13 +45,23 @@ def get_datafiles_retry_count() -> int:
     return max(0, min(value, 5))
 
 
-def get_datafiles_retry_delay_seconds() -> float:
-    raw = str(os.getenv("DISCOVERY_DATAFILES_RETRY_DELAY_SECONDS", "0.5")).strip()
+def get_retry_delay_seconds() -> float:
+    raw = str(os.getenv("DISCOVERY_RETRY_DELAY_SECONDS", "0.5")).strip()
     try:
         value = float(raw)
     except ValueError:
         return 0.5
     return max(0.0, min(value, 10.0))
+
+
+def get_base_parent_id() -> str:
+    value = os.getenv("BASE_PARENT_ID", "aimdl").strip()
+    return value
+
+
+def get_base_parent_type() -> str:
+    value = os.getenv("BASE_PARENT_TYPE", "collection").strip()
+    return value
 
 
 def _as_str(value: Any) -> str | None:
@@ -66,7 +76,6 @@ def get_model_type(row: dict[str, Any]) -> str | None:
     model_type = row.get("_modelType")
     return _as_str(model_type)
 
-
 def get_item_id(row: dict[str, Any]) -> str | None:
     if get_model_type(row) == "item":
         id = row.get("_id")
@@ -77,7 +86,6 @@ def get_item_id(row: dict[str, Any]) -> str | None:
 def get_fname(row: dict[str, Any]) -> str | None:
     value = row.get("name")
     return _as_str(value)
-
 
 def get_meta(row: dict[str, Any]) -> dict[str, Any]:
     meta = row.get("meta")
@@ -90,7 +98,6 @@ def get_experiment_date(row: dict[str, Any]) -> str | None:
     value = meta.get("experiment_date")
     return _as_str(value)
 
-
 def get_folder_id(row: dict[str, Any]) -> str | None:
     value = row.get("folderId")
     return _as_str(value)
@@ -101,18 +108,20 @@ def get_igsn(row: dict[str, Any]) -> str | None:
     return _as_str(value)
 
 
-def fetch_partitions(gc: Any, data_type: str, since: str) -> dict[str, str]:
+def fetch_partitions(gc: Any, base_id: str, base_type: str, data_type: str, since: str) -> dict[str, str]:
     response = gc.get(
-        "aimdl/partition",
+        f"aimdl/partition",
         parameters={
             "dataType": data_type,
             "since": since,
+            "baseParentId": base_id,
+            "baseParentType": base_type,
         },
     )
     if response is None:
         return {}
     if not isinstance(response, dict):
-        raise DatafilesDiscoveryError("Expected dict response from aimdl/partition")
+        raise DatafilesDiscoveryError(f"Expected dict response from aimdl/partition")
 
     normalized: dict[str, str] = {}
     for key, checksum in response.items():
@@ -124,18 +133,20 @@ def fetch_partitions(gc: Any, data_type: str, since: str) -> dict[str, str]:
     return normalized
 
 
-def fetch_partition_details(gc: Any, key: str, data_type: str) -> list[dict[str, Any]]:
+def fetch_partition_details(gc: Any, base_id: str, base_type:str, key: str, data_type: str) -> list[dict[str, Any]]:
     response = gc.get(
         "aimdl/partition/details",
         parameters={
             "key": key,
             "dataType": data_type,
+            "baseParentId": base_id,
+            "baseParentType": base_type,
         },
     )
     if response is None:
         return []
     if not isinstance(response, list):
-        raise DatafilesDiscoveryError("Expected list response from aimdl/partition/details")
+        raise DatafilesDiscoveryError(f"Expected list response from aimdl/partition/details")
 
     rows: list[dict[str, Any]] = []
     for row in response:
@@ -145,8 +156,8 @@ def fetch_partition_details(gc: Any, key: str, data_type: str) -> list[dict[str,
 
 
 def call_with_retries(fn, *args, **kwargs):
-    retry_count = get_datafiles_retry_count()
-    retry_delay_seconds = get_datafiles_retry_delay_seconds()
+    retry_count = get_retry_count()
+    retry_delay_seconds = get_retry_delay_seconds()
 
     last_error: Exception | None = None
     for attempt in range(retry_count + 1):
@@ -160,5 +171,5 @@ def call_with_retries(fn, *args, **kwargs):
                 time.sleep(retry_delay_seconds)
 
     if last_error is None:
-        raise DatafilesDiscoveryError("Datafiles call failed without captured exception")
+        raise DatafilesDiscoveryError("Girder API call failed without captured exception")
     raise last_error

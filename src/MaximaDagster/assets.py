@@ -12,6 +12,8 @@ from dagster import (
 )
 
 from .utils.discovery import (
+    get_base_parent_id,
+    get_base_parent_type,
     call_with_retries,
     fetch_partition_details,
     get_fname,
@@ -70,15 +72,17 @@ def _resolve_model_file(gc: Any, model_item_id: str) -> tuple[dict[str, Any], di
     return pth_files[0], meta, pth_files[0]["name"]
 
 
-def _get_target_calibrant_file_id(gc: Any, partition_key: str) -> str:
+def _get_target_calibrant_item_id(gc: Any, partition_key: str) -> str:
     
     keys = partition_key.split("//")
     if len(keys) != 2:
         raise ValueError(f"Invalid partition key format: {partition_key}. Expected format is IGSN//experiment_date.")
     
     experiment_date_str = keys[-1].strip()
-    experiment_date = datetime.fromisoformat(experiment_date_str)
+    experiment_date = datetime.fromisoformat(experiment_date_str).astimezone(timezone.utc)
 
+    base_id = get_base_parent_id()
+    base_type = get_base_parent_type()
 
     calibrant_datafiles = call_with_retries(
         gc.get,
@@ -87,24 +91,32 @@ def _get_target_calibrant_file_id(gc: Any, partition_key: str) -> str:
             "dataType": "xrd_calibrant_raw",
             "sort": "created",
             "sortdir": -1,  
-            "limit": 10     # may need to be increased if calibration becomes more frequent
+            "limit": 10,     # may need to be increased if calibration becomes more frequent
+            "baseParentId": base_id,
+            "baseParentType": base_type,
         }
     )
 
     for row in calibrant_datafiles:
-        calibrant_date_str = row.get("created")
-        calibrant_date = datetime.fromisoformat(calibrant_date_str) if calibrant_date_str else None
         fname = get_fname(row)
-        
-        if calibrant_date < experiment_date and fname and CALIBRANT_SCAN_PATTERN.match(fname):
 
+        calibrant_date_str = row.get("created")
+        if calibrant_date_str:
+            calibrant_date = datetime.fromisoformat(calibrant_date_str)
+
+            if calibrant_date.tzinfo is None:
+                calibrant_date = calibrant_date.replace(tzinfo=timezone.utc)
+            else:
+                calibrant_date = calibrant_date.astimezone(timezone.utc)
+        else:
+            calibrant_date = None
+
+        if calibrant_date and calibrant_date < experiment_date and fname and CALIBRANT_SCAN_PATTERN.match(fname):
             item_id = get_item_id(row)
-            
-            for file_obj in gc.listFile(item_id):
-                return str(file_obj["_id"])
+            return item_id
                     
     raise ValueError(
-        f"No valid calibrant scans found prior to experiment date: {experiment_date_str}"
+        f"No valid calibrant scans found. Checked calibrant datafiles: {[get_fname(row) for row in calibrant_datafiles]}"
     )
 
 
@@ -147,14 +159,20 @@ def calibration_model(context: AssetExecutionContext):
 def xrd_calibrant_raw(context: AssetExecutionContext):
     gc = context.resources.GirderClient
     partition_key = context.partition_key
+    base_id = get_base_parent_id()
+    base_type = get_base_parent_type()
 
     details = call_with_retries(
         fetch_partition_details, 
         gc, 
+        base_id=base_id,
+        base_type=base_type,
         key=partition_key, 
         data_type="xrd_calibrant_raw"
     )
 
+
+    item_id = None
     for row in details:
         fname = get_fname(row)
 
@@ -204,7 +222,8 @@ def poni(context: AssetExecutionContext, calibration_model, xrd_calibrant_raw):
 
     cache = CalibrationCache()
 
-    poni_path = str(cache.cache_dir / f"{calibrant_file_name}.poni")                                        #TODO: consider updating this naming convention
+    poni_file_name = os.path.splitext(calibrant_file_name)[0]
+    poni_path = str(cache.cache_dir / f"{poni_file_name}.poni")                                        #TODO: consider updating this naming convention
     geometry = calibrator.calibrate(xrd_calibrant_raw["pattern"], output_path=poni_path)
 
     poni_metadata = {
@@ -219,7 +238,7 @@ def poni(context: AssetExecutionContext, calibration_model, xrd_calibrant_raw):
             girder_url=girder_url,
             igsn=calibrant_igsn,
         ),
-        "dataType": "xrd_calibrant_derived",
+        "data_type": "xrd_calibrant_derived",
     }
 
     poni_bytes = Path(poni_path).read_bytes()
@@ -250,10 +269,14 @@ def poni(context: AssetExecutionContext, calibration_model, xrd_calibrant_raw):
 def xrd_raw(context: AssetExecutionContext):
     gc = context.resources.GirderClient 
     partition_key = context.partition_key
+    base_id = get_base_parent_id()
+    base_type = get_base_parent_type()
 
     details = call_with_retries(
         fetch_partition_details, 
         gc, 
+        base_id=base_id,
+        base_type=base_type,
         key=partition_key, 
         data_type="xrd_raw"
     )
@@ -329,7 +352,7 @@ def active_poni(context: AssetExecutionContext, calibration_model):
     gc = context.resources.GirderClient
     cache = CalibrationCache()
     
-    target_calibrant_id = _get_target_calibrant_file_id(gc, context.partition_key)
+    target_calibrant_id = _get_target_calibrant_item_id(gc, context.partition_key)
     
     model_version = str(calibration_model["metadata"]["version"])
     model_source_id = str(calibration_model["metadata"]["source_file_id"])
@@ -344,7 +367,7 @@ def active_poni(context: AssetExecutionContext, calibration_model):
             "Waiting for calibration_precompute to finish..."
         )
 
-        raise RetryRequested(max_retries=30, seconds_to_wait=60)
+        raise RetryRequested(max_retries=10, seconds_to_wait=10)
         
     context.log.info(f"Successfully loaded cached PONI for calibrant {target_calibrant_id}")
     return {
@@ -376,7 +399,7 @@ def azimuthal_integration(context: AssetExecutionContext, xrd_raw, active_poni):
             girder_url=girder_url,
             geometry=active_poni["geometry"],
         ),
-        "dataType": "xrd_derived",
+        "data_type": "xrd_derived",
     }
 
     uploaded_files = []
