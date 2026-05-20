@@ -145,6 +145,7 @@ env.bak/
 venv.bak/
 .vscode/
 .env.staging
+.env.test
 
 # Spyder project settings
 .spyderproject
@@ -219,3 +220,5 @@ data/
 
 # Instructions
 .github/copilot-instructions.md
+.github/prompts/
+.github/agents/
