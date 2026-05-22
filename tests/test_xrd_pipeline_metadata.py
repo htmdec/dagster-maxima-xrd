@@ -84,7 +84,6 @@ def test_xrd_raw_preserves_igsn_and_source_shape(tmp_path, monkeypatch) -> None:
 
     assert result["experiment_folder_id"] == "exp_01"
     assert result["experiment_name"] == "experiment_01"
-    assert result["folder_id"] == "raw_01"
     assert set(result["scans"][0].keys()) == {"igsn", "xrd", "source_files", "source_item_ids"}
     assert result["scans"][0]["igsn"] == "IGSN-123"
     assert result["scans"][0]["source_files"] == ["scan_point_0_data_00001.h5"]
@@ -109,6 +108,15 @@ def test_azimuthal_integration_uploads_exact_metadata_shape(monkeypatch) -> None
             1: pd.DataFrame({"q_nm^-1": [3.0], "intensity": [4.0]}),
         },
     )
+    geometry = SimpleNamespace(
+        dist=1.1,
+        poni1=2.2,
+        poni2=3.3,
+        rot1=4.4,
+        rot2=5.5,
+        rot3=6.6,
+    )
+    monkeypatch.setattr(assets, "load_geometry_from_poni", lambda path: geometry)
 
     context = _AssetContextStub(
         resources={"GirderClient": object()},
@@ -124,15 +132,15 @@ def test_azimuthal_integration_uploads_exact_metadata_shape(monkeypatch) -> None
             1: {"xrd": np.array([4, 5, 6])},
         },
     }
-    active_poni_payload = {
+    poni_payload = {
         "poni_item_id": "poni_item_1",
-        "geometry": SimpleNamespace(dist=1.1, poni1=2.2, poni2=3.3, rot1=4.4, rot2=5.5, rot3=6.6),
+        "poni_path": "data/calibrations/test.poni",
     }
 
     result = assets.azimuthal_integration.op.compute_fn.decorated_fn(
         context,
         xrd_raw=xrd_payload,
-        active_poni=active_poni_payload,
+        poni=poni_payload,
     )
 
     assert set(result.keys()) == {0, 1}

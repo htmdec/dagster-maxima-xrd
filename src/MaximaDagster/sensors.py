@@ -1,15 +1,18 @@
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from dagster import (
+    AssetKey,
     DynamicPartitionsDefinition,
     RunRequest,
     SensorEvaluationContext,
+    SensorDefinition,
     SensorResult,
     sensor,
 )
 
+from .partition_mapping import parse_partition_datetime, select_closest_preceding_partition
 from .utils.discovery import (
     get_base_parent_id,
     get_base_parent_type,
@@ -67,12 +70,74 @@ def _serialize_girder_cursor(since: str, checksums_by_partition: dict[str, str])
     )
 
 
+PartitionGate = Callable[[SensorEvaluationContext, Any, str, str], bool]
+
+
+def _resolve_closest_calibrant_partition_key(gc: Any, experiment_partition_key: str) -> str | None:
+    base_id = get_base_parent_id()
+    base_type = get_base_parent_type()
+
+    calibrant_partitions = call_with_retries(
+        fetch_partitions,
+        gc,
+        base_id=base_id,
+        base_type=base_type,
+        data_type="xrd_calibrant_raw",
+        since=_default_since(),
+    )
+    calibrant_keys = list(calibrant_partitions.keys())
+    if not calibrant_keys:
+        return None
+
+    experiment_date = parse_partition_datetime(experiment_partition_key)
+    return select_closest_preceding_partition(calibrant_keys, experiment_date)
+
+
+def _poni_partition_materialized(
+    context: SensorEvaluationContext,
+    calibrant_partition_key: str,
+) -> bool:
+    materialized = context.instance.get_materialized_partitions(AssetKey("poni"))
+    return calibrant_partition_key in materialized
+
+
+def _poni_ready_for_experiment(
+    context: SensorEvaluationContext,
+    gc: Any,
+    partition_key: str,
+    checksum: str,
+) -> bool:
+    _ = checksum
+    try:
+        target_calibrant_key = _resolve_closest_calibrant_partition_key(gc, partition_key)
+    except ValueError as exc:
+        context.log.warning(str(exc))
+        return False
+
+    if target_calibrant_key is None:
+        context.log.info(
+            "No calibrant partition exists before the experiment. "
+            f"Skipping partition {partition_key}."
+        )
+        return False
+
+    if not _poni_partition_materialized(context, target_calibrant_key):
+        context.log.info(
+            "Required PONI partition is not materialized yet. "
+            f"Skipping partition {partition_key} (calibrant {target_calibrant_key})."
+        )
+        return False
+
+    return True
+
+
 def build_girder_partition_sensor(
     sensor_name: str,
     job_name: str,
     data_type: str,
     partitions_def: DynamicPartitionsDefinition,
-):
+    partition_gate: PartitionGate | None = None,
+) -> SensorDefinition:
     """
     Factory function to generate a dynamically partitioned Girder sensor.
     """
@@ -82,7 +147,10 @@ def build_girder_partition_sensor(
         minimum_interval_seconds=30,
         required_resource_keys={"GirderClient"},
     )
-    def _generic_sensor(context: SensorEvaluationContext, GirderClient=None):
+    def _generic_sensor(
+        context: SensorEvaluationContext,
+        GirderClient: Any | None = None,
+    ) -> SensorResult:
         gc = GirderClient or context.resources.GirderClient
 
         base_id = get_base_parent_id()
@@ -99,18 +167,36 @@ def build_girder_partition_sensor(
             since=poll_since,
         )
 
-        merged_checksums = dict(checksums_by_partition)
-        merged_checksums.update(partition_updates)
-
         changed_partition_keys = [
             partition_key
             for partition_key, checksum in partition_updates.items()
             if checksums_by_partition.get(partition_key) != checksum
         ]
 
-        if not context.cursor or not changed_partition_keys:
+        eligible_partition_keys: list[str] = []
+        for partition_key in changed_partition_keys:
+            checksum = partition_updates[partition_key]
+            if partition_gate and not partition_gate(context, gc, partition_key, checksum):
+                continue
+            eligible_partition_keys.append(partition_key)
+
+        blocked_partition_keys = [
+            partition_key
+            for partition_key in changed_partition_keys
+            if partition_key not in eligible_partition_keys
+        ]
+
+        cursor_since = _next_since()
+        if blocked_partition_keys:
+            cursor_since = since or _default_since()
+
+        merged_checksums = dict(checksums_by_partition)
+        for partition_key in eligible_partition_keys:
+            merged_checksums[partition_key] = partition_updates[partition_key]
+
+        if not context.cursor or not eligible_partition_keys:
             return SensorResult(
-                cursor=_serialize_girder_cursor(_next_since(), merged_checksums),
+                cursor=_serialize_girder_cursor(cursor_since, merged_checksums),
                 run_requests=[],
                 dynamic_partitions_requests=[],
             )
@@ -118,7 +204,7 @@ def build_girder_partition_sensor(
         existing_partitions = set(context.instance.get_dynamic_partitions(partitions_def.name))
         new_partitions = [
             partition_key 
-            for partition_key in changed_partition_keys 
+            for partition_key in eligible_partition_keys 
             if partition_key not in existing_partitions
         ]
 
@@ -133,7 +219,7 @@ def build_girder_partition_sensor(
                     "data_type": data_type,
                 },
             )
-            for partition_key in changed_partition_keys
+            for partition_key in eligible_partition_keys
         ]
 
         dynamic_requests = []
@@ -141,7 +227,7 @@ def build_girder_partition_sensor(
             dynamic_requests = [partitions_def.build_add_request(new_partitions)]
 
         return SensorResult(
-            cursor=_serialize_girder_cursor(_next_since(), merged_checksums),
+            cursor=_serialize_girder_cursor(cursor_since, merged_checksums),
             run_requests=run_requests,
             dynamic_partitions_requests=dynamic_requests,
         )
@@ -158,6 +244,7 @@ xrd_experiment_sensor = build_girder_partition_sensor(
     job_name="xrd",
     data_type="xrd_raw",
     partitions_def=experiment_partitions,
+    partition_gate=_poni_ready_for_experiment,
 )
 
 xrd_calibration_sensor = build_girder_partition_sensor(

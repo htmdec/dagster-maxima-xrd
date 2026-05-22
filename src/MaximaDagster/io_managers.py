@@ -26,7 +26,7 @@ class SanitizedFilesystemIOManager(ConfigurableIOManager):
             path_parts = [part for part in [context.step_key, context.name] if part]
         if context.has_asset_partitions:
             sanitized_partition = (
-                context.partition_key.replace(":", "-").replace("/", "-")
+                context.asset_partition_key.replace(":", "-").replace("/", "-")
             )
             path_parts.append(sanitized_partition)
         return base_dir.joinpath(*path_parts)

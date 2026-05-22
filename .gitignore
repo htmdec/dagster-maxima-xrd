@@ -210,6 +210,7 @@ __marimo__/
 .*dagster*
 dagster_home/
 dagster_staging_home/
+dagster_local_home/
 
 # Private
 TODO.md

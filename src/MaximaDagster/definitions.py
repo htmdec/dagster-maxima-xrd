@@ -7,7 +7,7 @@ from .io_managers import sanitized_fs_io_manager
 
 xrd = define_asset_job(
     name="xrd",
-    selection=["xrd_raw", "active_poni", "azimuthal_integration"],
+    selection=["xrd_raw", "azimuthal_integration"],
 )
 
 calibration_precompute = define_asset_job(
@@ -16,7 +16,7 @@ calibration_precompute = define_asset_job(
 )
 
 defs = Definitions(
-    assets=[xrd_raw, xrd_calibrant_raw, calibration_model, poni, azimuthal_integration, active_poni],
+    assets=[xrd_raw, xrd_calibrant_raw, calibration_model, poni, azimuthal_integration],
     jobs=[xrd, calibration_precompute],
     sensors=[xrd_experiment_sensor, xrd_calibration_sensor],
     resources={
