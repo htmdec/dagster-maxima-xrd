@@ -12,11 +12,11 @@ xrd = define_asset_job(
 
 calibration_precompute = define_asset_job(
     name="calibration_precompute",
-    selection=["calibration_model", "xrd_calibrant_raw", "poni"],
+    selection=["calibration_model", "poni"],
 )
 
 defs = Definitions(
-    assets=[xrd_raw, xrd_calibrant_raw, calibration_model, poni, azimuthal_integration],
+    assets=[xrd_raw, calibration_model, poni, azimuthal_integration],
     jobs=[xrd, calibration_precompute],
     sensors=[xrd_experiment_sensor, xrd_calibration_sensor],
     resources={

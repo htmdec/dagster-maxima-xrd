@@ -9,6 +9,7 @@ from pyFAI.integrator.azimuthal import AzimuthalIntegrator as PyFAIAzimuthalInte
 from dagster import (
     AssetIn,
     AssetExecutionContext,
+    Failure,
     asset,
 )
 
@@ -37,7 +38,11 @@ from .utils.results_publisher import (
 from .sensors import calibrant_partitions, experiment_partitions
 
 
-def _read_xrd_h5_from_item_id(gc: Any, item_id: str) -> Any:
+def _read_xrd_h5_from_item_id(
+    context: AssetExecutionContext,
+    gc: Any,
+    item_id: str,
+) -> Any:
     item_files = list(gc.listFile(item_id))
     h5_files = [
         f for f in item_files 
@@ -45,9 +50,18 @@ def _read_xrd_h5_from_item_id(gc: Any, item_id: str) -> Any:
     ]
     
     if not h5_files:
-        raise ValueError(
-            f"Expected an .h5 file inside item {item_id}, but found: "
-            f"{[f.get('name') for f in item_files]}"
+        raise Failure(
+            description=(
+                "Expected an .h5 file inside item, but found: "
+                f"{[f.get('name') for f in item_files]}"
+            ),
+            metadata={
+                "context": {
+                    "partition_key": context.partition_key,
+                    "run_id": str(context.run.run_id),
+                },
+                "item_id": item_id,
+            },
         )
         
     file_id = str(h5_files[0]["_id"])
@@ -124,26 +138,30 @@ def calibration_model(context: AssetExecutionContext) -> dict[str, Any]:
 
 
 @asset(required_resource_keys={"GirderClient"}, partitions_def=calibrant_partitions)
-def xrd_calibrant_raw(context: AssetExecutionContext) -> dict[str, Any]:
+def poni(
+    context: AssetExecutionContext,
+    calibration_model: dict[str, Any],
+) -> dict[str, Any]:
     gc = context.resources.GirderClient
+    run_id = str(context.run.run_id)
+    girder_url = str(os.getenv("GIRDER_API_URL") or "")
     partition_key = context.partition_key
     base_id = get_base_parent_id()
     base_type = get_base_parent_type()
 
     details = call_with_retries(
-        fetch_partition_details, 
-        gc, 
+        fetch_partition_details,
+        gc,
         base_id=base_id,
         base_type=base_type,
-        key=partition_key, 
-        data_type="xrd_calibrant_raw"
+        key=partition_key,
+        data_type="xrd_calibrant_raw",
     )
-
 
     item_id: str | None = None
     fname: str | None = None
     igsn: str | None = None
-    folder: str | None = None
+    folder_id: str | None = None
     for row in details:
         fname = get_fname(row)
 
@@ -152,41 +170,26 @@ def xrd_calibrant_raw(context: AssetExecutionContext) -> dict[str, Any]:
 
         item_id = get_item_id(row)
         igsn = get_igsn(row)
-        folder = get_folder_id(row)
+        folder_id = get_folder_id(row)
         break
 
-    if item_id is None or fname is None or folder is None:
-        raise ValueError(
-            f"Could not find a valid calibrant file matching the expected pattern in partition {partition_key}."
+    if item_id is None or fname is None or folder_id is None:
+        raise Failure(
+            description=(
+                "Could not find a valid calibrant file matching the expected pattern "
+                f"in partition {partition_key}."
+            ),
+            metadata={
+                "context": {
+                    "partition_key": partition_key,
+                    "run_id": run_id,
+                },
+                "data_type": "xrd_calibrant_raw",
+            },
         )
-    
-    calibration_pattern = _read_xrd_h5_from_item_id(gc, item_id)
 
-    context.log.info(f"Successfully loaded raw calibrant scan: {fname}")
+    calibration_pattern = _read_xrd_h5_from_item_id(context, gc, item_id)
     
-    return {
-        "calibrant_item_id": item_id,
-        "calibrant_file_name": fname,
-        "pattern": calibration_pattern,
-        "igsn": igsn,
-        "folder_id": folder,
-    }
-
-
-@asset(required_resource_keys={"GirderClient"}, partitions_def=calibrant_partitions)
-def poni(
-    context: AssetExecutionContext,
-    calibration_model: dict[str, Any],
-    xrd_calibrant_raw: dict[str, Any],
-) -> dict[str, Any]:
-    gc = context.resources.GirderClient
-    run_id = str(context.run.run_id)
-    girder_url = str(os.getenv("GIRDER_API_URL") or "")
-    partition_key = context.partition_key
-    
-    calibrant_item_id = xrd_calibrant_raw["calibrant_item_id"]
-    calibrant_file_name = xrd_calibrant_raw["calibrant_file_name"]
-    calibrant_igsn = xrd_calibrant_raw["igsn"]
     model_metadata = calibration_model["metadata"]
 
     calibrator = calibrate.MaximaCalibrator(
@@ -196,11 +199,14 @@ def poni(
         float(model_metadata["energy"]),
     )
 
-    poni_file_name = Path(calibrant_file_name).stem
-    poni_dir = Path("data") / "calibrations"
-    poni_dir.mkdir(parents=True, exist_ok=True)
-    poni_path = poni_dir / f"{poni_file_name}.poni"
-    calibrator.calibrate(xrd_calibrant_raw["pattern"], output_path=str(poni_path))
+    geometry = calibrator.calibrate(calibration_pattern)
+    del calibration_pattern
+
+    poni_file_name = Path(fname).stem
+    with tempfile.TemporaryDirectory() as tmpdir:
+        poni_path = Path(tmpdir) / f"{poni_file_name}.poni"
+        geometry.save(str(poni_path))
+        poni_bytes = poni_path.read_bytes()
 
     poni_metadata = {
         "prov": build_prov_metadata(run_id),
@@ -210,25 +216,29 @@ def poni(
             girder_url=girder_url,
         ),
         "calibrant": build_calibrant_metadata(
-            calibrant_item_id=calibrant_item_id,
+            calibrant_item_id=item_id,
             girder_url=girder_url,
-            igsn=calibrant_igsn,
+            igsn=igsn,
         ),
         "data_type": "xrd_calibrant_derived",
     }
 
-    poni_bytes = poni_path.read_bytes()
     poni_item_id = upload_artifact(
         gc=gc,
-        folder_id=xrd_calibrant_raw["folder_id"],
-        filename=f"{calibrant_file_name}.poni",
+        folder_id=folder_id,
+        filename=f"{fname}.poni",
         payload=poni_bytes,
         mime_type="text/plain",
         metadata=poni_metadata,
     )
 
     context.log.info(f"Generated new PONI geometry for {partition_key}")
-    return {"poni_path": str(poni_path), "poni_item_id": poni_item_id}
+    return {
+        "poni_bytes": poni_bytes,
+        "poni_file_name": f"{fname}.poni",
+        "poni_item_id": poni_item_id,
+        "calibrant_item_id": item_id,
+    }
 
 
 @asset(required_resource_keys={"GirderClient"}, partitions_def=experiment_partitions)
@@ -278,7 +288,7 @@ def xrd_raw(context: AssetExecutionContext) -> dict[str, Any]:
         if item_igsn:
             scans[scan_num]["igsn"] = item_igsn
 
-        scans[scan_num]["xrd"] = _read_xrd_h5_from_item_id(gc, item_id)
+        scans[scan_num]["xrd"] = _read_xrd_h5_from_item_id(context, gc, item_id)
         scans[scan_num].setdefault("source_files", []).append(fname)
         scans[scan_num].setdefault("source_item_ids", []).append(item_id)
 
@@ -329,7 +339,10 @@ def azimuthal_integration(
     scans = xrd_raw["scans"]
 
     xrd_scans = {scan_id: scan["xrd"] for scan_id, scan in scans.items() if "xrd" in scan}
-    geometry = load_geometry_from_poni(poni["poni_path"])
+    with tempfile.TemporaryDirectory() as tmpdir:
+        poni_path = Path(tmpdir) / "poni.poni"
+        poni_path.write_bytes(poni["poni_bytes"])
+        geometry = load_geometry_from_poni(poni_path)
     results = AzimuthalIntegrator.integrate_dict(xrd_scans, geometry)
 
     ai_metadata = {
