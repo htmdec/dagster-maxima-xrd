@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
+import functools
 import io
 import tomllib
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-_WORKFLOW_VERSION_CACHE: str | None = None
 
 def upload_artifact(
     gc: Any,
@@ -46,17 +44,14 @@ def upload_artifact(
     
     return str(item["_id"])
 
+
+@functools.cache
 def get_workflow_version() -> str:
     """Get the workflow version from pyproject.toml.
     
     Returns:
         Version string from pyproject.toml, or a default fallback if unable to read.
     """
-    global _WORKFLOW_VERSION_CACHE
-    
-    if _WORKFLOW_VERSION_CACHE is not None:
-        return _WORKFLOW_VERSION_CACHE
-    
     try:
         current = Path(__file__).resolve()
         for parent in [current.parent, *current.parent.parents]:
@@ -64,14 +59,10 @@ def get_workflow_version() -> str:
             if pyproject_path.exists():
                 with open(pyproject_path, "rb") as f:
                     data = tomllib.load(f)
-                    version = data.get("project", {}).get("version", "unknown")
-                    _WORKFLOW_VERSION_CACHE = version
-                    return version
-        
-        _WORKFLOW_VERSION_CACHE = "unknown"
+                    return data.get("project", {}).get("version", "unknown")
+
         return "unknown"
     except Exception:
-        _WORKFLOW_VERSION_CACHE = "unknown"
         return "unknown"
 
 
@@ -115,44 +106,21 @@ def build_calibrant_metadata(
         payload["igsn"] = igsn
     return payload
 
-
-@dataclass(frozen=True)
-class PoniGeometryValues:
-    dist: float
-    poni1: float
-    poni2: float
-    rot1: float
-    rot2: float
-    rot3: float
-
-
-def extract_poni_geometry_values(geometry: Any) -> PoniGeometryValues:
-    return PoniGeometryValues(
-        dist=float(getattr(geometry, "dist")),
-        poni1=float(getattr(geometry, "poni1")),
-        poni2=float(getattr(geometry, "poni2")),
-        rot1=float(getattr(geometry, "rot1")),
-        rot2=float(getattr(geometry, "rot2")),
-        rot3=float(getattr(geometry, "rot3")),
-    )
-
-
 def build_poni_linkage_metadata(
     poni_item_id: str,
     girder_url: str,
     geometry: Any,
 ) -> dict[str, Any]:
-    geometry_values = extract_poni_geometry_values(geometry)
     return {
         "item_id": poni_item_id,
         "link": build_item_link(girder_url, poni_item_id),
         "geometry": {
-            "dist": geometry_values.dist,
-            "poni1": geometry_values.poni1,
-            "poni2": geometry_values.poni2,
-            "rot1": geometry_values.rot1,
-            "rot2": geometry_values.rot2,
-            "rot3": geometry_values.rot3,
+            "dist": float(geometry.dist),
+            "poni1": float(geometry.poni1),
+            "poni2": float(geometry.poni2),
+            "rot1": float(geometry.rot1),
+            "rot2": float(geometry.rot2),
+            "rot3": float(geometry.rot3),
         },
     }
 
@@ -163,6 +131,5 @@ __all__ = [
     "build_prov_metadata",
     "build_model_metadata",
     "build_calibrant_metadata",
-    "extract_poni_geometry_values",
     "build_poni_linkage_metadata",
 ]

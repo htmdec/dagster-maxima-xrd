@@ -3,8 +3,8 @@ import pandas as pd
 from MaximaDagster.utils import results_publisher
 
 
-def test_get_workflow_version_uses_cache_after_first_read(monkeypatch) -> None:
-    monkeypatch.setattr(results_publisher, "_WORKFLOW_VERSION_CACHE", None)
+def test_get_workflow_version_uses_cache_after_first_read() -> None:
+    results_publisher.get_workflow_version.cache_clear()
 
     first = results_publisher.get_workflow_version()
     second = results_publisher.get_workflow_version()
@@ -20,7 +20,7 @@ def test_get_workflow_version_returns_unknown_on_read_error(monkeypatch) -> None
             raise RuntimeError("fs error")
 
     monkeypatch.setattr(results_publisher, "Path", _BrokenPath)
-    monkeypatch.setattr(results_publisher, "_WORKFLOW_VERSION_CACHE", None)
+    results_publisher.get_workflow_version.cache_clear()
 
     assert results_publisher.get_workflow_version() == "unknown"
 
