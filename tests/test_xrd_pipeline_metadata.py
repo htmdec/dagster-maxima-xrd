@@ -47,6 +47,24 @@ class _XrdRawClient:
         raise AssertionError(folder_id)
 
 
+class _PoniClient:
+    def __init__(self, h5_path: Path, detail_rows) -> None:
+        self._h5_path = h5_path
+        self._detail_rows = detail_rows
+
+    def get(self, route, parameters=None):
+        if route == "aimdl/partition/details":
+            return list(self._detail_rows)
+        raise AssertionError(route)
+
+    def listFile(self, item_id):
+        return [{"_id": f"file_{item_id}", "name": "xrd_calibrant_data_000001.h5"}]
+
+    def downloadFile(self, file_id, local_path):
+        _ = file_id
+        Path(local_path).write_bytes(self._h5_path.read_bytes())
+
+
 class _LogStub:
     def info(self, msg):
         _ = msg
@@ -84,7 +102,6 @@ def test_xrd_raw_preserves_igsn_and_source_shape(tmp_path, monkeypatch) -> None:
 
     assert result["experiment_folder_id"] == "exp_01"
     assert result["experiment_name"] == "experiment_01"
-    assert result["folder_id"] == "raw_01"
     assert set(result["scans"][0].keys()) == {"igsn", "xrd", "source_files", "source_item_ids"}
     assert result["scans"][0]["igsn"] == "IGSN-123"
     assert result["scans"][0]["source_files"] == ["scan_point_0_data_00001.h5"]
@@ -109,6 +126,15 @@ def test_azimuthal_integration_uploads_exact_metadata_shape(monkeypatch) -> None
             1: pd.DataFrame({"q_nm^-1": [3.0], "intensity": [4.0]}),
         },
     )
+    geometry = SimpleNamespace(
+        dist=1.1,
+        poni1=2.2,
+        poni2=3.3,
+        rot1=4.4,
+        rot2=5.5,
+        rot3=6.6,
+    )
+    monkeypatch.setattr(assets, "load_geometry_from_poni", lambda path: geometry)
 
     context = _AssetContextStub(
         resources={"GirderClient": object()},
@@ -124,15 +150,15 @@ def test_azimuthal_integration_uploads_exact_metadata_shape(monkeypatch) -> None
             1: {"xrd": np.array([4, 5, 6])},
         },
     }
-    active_poni_payload = {
+    poni_payload = {
         "poni_item_id": "poni_item_1",
-        "geometry": SimpleNamespace(dist=1.1, poni1=2.2, poni2=3.3, rot1=4.4, rot2=5.5, rot3=6.6),
+        "poni_bytes": b"poni",
     }
 
     result = assets.azimuthal_integration.op.compute_fn.decorated_fn(
         context,
         xrd_raw=xrd_payload,
-        active_poni=active_poni_payload,
+        poni=poni_payload,
     )
 
     assert set(result.keys()) == {0, 1}
@@ -159,16 +185,40 @@ def test_poni_uploads_exact_metadata_shape(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GIRDER_API_URL", "https://girder.example/api/v1")
 
+    h5_path = tmp_path / "calibrant.h5"
+    _write_test_h5(h5_path)
+
+    rows = [
+        {
+            "_modelType": "item",
+            "_id": "cal_item_1",
+            "name": "xrd_calibrant_data_000001.h5",
+            "folderId": "cal_folder",
+            "meta": {"igsn": "CAL-IGSN-1"},
+        }
+    ]
+    gc = _PoniClient(h5_path=h5_path, detail_rows=rows)
+
     captured = {}
 
     class _FakeCalibrator:
         def __init__(self, model_path, calibrant, detector, energy):
             _ = (model_path, calibrant, detector, energy)
 
-        def calibrate(self, pattern, output_path):
+        def calibrate(self, pattern):
             _ = pattern
-            Path(output_path).write_text("poni", encoding="utf-8")
-            return SimpleNamespace(dist=1.0, poni1=2.0, poni2=3.0, rot1=4.0, rot2=5.0, rot3=6.0)
+            return _GeometryStub()
+
+    class _GeometryStub:
+        dist = 1.0
+        poni1 = 2.0
+        poni2 = 3.0
+        rot1 = 4.0
+        rot2 = 5.0
+        rot3 = 6.0
+
+        def save(self, path):
+            Path(path).write_text("poni", encoding="utf-8")
 
     def _fake_upload_artifact(**kwargs):
         captured.update(kwargs)
@@ -178,7 +228,7 @@ def test_poni_uploads_exact_metadata_shape(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(assets, "upload_artifact", _fake_upload_artifact)
 
     context = _AssetContextStub(
-        resources={"GirderClient": object()},
+        resources={"GirderClient": gc},
         partition_key="cal_01",
         run_id="run_poni",
     )
@@ -194,13 +244,6 @@ def test_poni_uploads_exact_metadata_shape(tmp_path, monkeypatch) -> None:
                 "version": "1.2.3",
                 "source_file_id": "model_file_1",
             },
-        },
-        xrd_calibrant_raw={
-            "calibrant_item_id": "cal_item_1",
-            "calibrant_file_name": "xrd_calibrant_data_000001.h5",
-            "igsn": "CAL-IGSN-1",
-            "pattern": np.array([1.0, 2.0]),
-            "folder_id": "cal_folder",
         },
     )
 
@@ -222,5 +265,6 @@ def test_poni_uploads_exact_metadata_shape(tmp_path, monkeypatch) -> None:
     }
     assert metadata["data_type"] == "xrd_calibrant_derived"
 
-    assert set(result.keys()) == {"poni_path", "poni_item_id"}
+    assert set(result.keys()) == {"poni_bytes", "poni_file_name", "poni_item_id", "calibrant_item_id"}
     assert result["poni_item_id"] == "poni_item_1"
+    assert result["calibrant_item_id"] == "cal_item_1"
