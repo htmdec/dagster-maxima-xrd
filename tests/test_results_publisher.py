@@ -1,13 +1,13 @@
 import pandas as pd
 
-from MaximaDagster.utils import results_publisher
+from MaximaDagster.utils import metadata
 
 
 def test_get_workflow_version_uses_cache_after_first_read() -> None:
-    results_publisher.get_workflow_version.cache_clear()
+    metadata.get_workflow_version.cache_clear()
 
-    first = results_publisher.get_workflow_version()
-    second = results_publisher.get_workflow_version()
+    first = metadata.get_workflow_version()
+    second = metadata.get_workflow_version()
 
     assert first
     assert second == first
@@ -19,10 +19,10 @@ def test_get_workflow_version_returns_unknown_on_read_error(monkeypatch) -> None
         def resolve():
             raise RuntimeError("fs error")
 
-    monkeypatch.setattr(results_publisher, "Path", _BrokenPath)
-    results_publisher.get_workflow_version.cache_clear()
+    monkeypatch.setattr(metadata, "Path", _BrokenPath)
+    metadata.get_workflow_version.cache_clear()
 
-    assert results_publisher.get_workflow_version() == "unknown"
+    assert metadata.get_workflow_version() == "unknown"
 
 
 class _FakeUploadClient:
@@ -59,7 +59,7 @@ class _FakeUploadClient:
 def test_upload_artifact_creates_file_when_item_has_no_files() -> None:
     gc = _FakeUploadClient(existing_files=[])
 
-    item_id = results_publisher.upload_artifact(
+    item_id = metadata.upload_artifact(
         gc=gc,
         folder_id="folder_1",
         filename="artifact.csv",
@@ -77,7 +77,7 @@ def test_upload_artifact_creates_file_when_item_has_no_files() -> None:
 def test_upload_artifact_updates_existing_file_when_present() -> None:
     gc = _FakeUploadClient(existing_files=[{"_id": "file_existing_1"}])
 
-    item_id = results_publisher.upload_artifact(
+    item_id = metadata.upload_artifact(
         gc=gc,
         folder_id="folder_1",
         filename="artifact.csv",
@@ -94,13 +94,13 @@ def test_upload_artifact_updates_existing_file_when_present() -> None:
 
 def test_build_item_link_strips_api_suffix() -> None:
     assert (
-        results_publisher.build_item_link("https://girder.example/api/v1", "item_1")
+        metadata.build_item_link("https://girder.example/api/v1", "item_1")
         == "https://girder.example/#item/item_1"
     )
 
 
 def test_build_calibrant_metadata_omits_empty_igsn() -> None:
-    payload = results_publisher.build_calibrant_metadata("cal_item", "https://girder.example/api/v1", None)
+    payload = metadata.build_calibrant_metadata("cal_item", "https://girder.example/api/v1", None)
 
     assert payload["item_id"] == "cal_item"
     assert "igsn" not in payload
@@ -126,7 +126,7 @@ def test_build_poni_linkage_metadata_has_exact_shape() -> None:
         rot2 = float(geometry["rot2"])
         rot3 = float(geometry["rot3"])
 
-    payload = results_publisher.build_poni_linkage_metadata(
+    payload = metadata.build_poni_linkage_metadata(
         poni_item_id="poni_item_1",
         girder_url="https://girder.example/api/v1",
         geometry=_GeometryProxy(),

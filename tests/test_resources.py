@@ -1,25 +1,23 @@
-from dagster import build_init_resource_context
-
 from MaximaDagster import resources
 
 
 class _FakeClient:
-    def __init__(self, apiUrl: str):
+    def __init__(self, apiUrl: str, apiKey: str, session):
         self.apiUrl = apiUrl
-        self.auth_calls = []
-
-    def authenticate(self, apiKey: str) -> None:
-        self.auth_calls.append(apiKey)
+        self.apiKey = apiKey
+        self.session = session
 
 
-def test_girder_client_resource_authenticates_with_config(monkeypatch) -> None:
-    monkeypatch.setattr(resources, "GC", _FakeClient)
-    context = build_init_resource_context(
-        config={"api_url": "https://girder.example/api/v1", "api_key": "secret"}
+def test_girder_connection_builds_client_with_api_credentials(monkeypatch) -> None:
+    monkeypatch.setattr(resources, "GirderClientWithSession", _FakeClient)
+
+    connection = resources.GirderConnection(
+        api_url="https://girder.example/api/v1",
+        api_key="secret",
     )
-
-    client = resources.GirderClient(context)
+    client = connection._make_client()
 
     assert isinstance(client, _FakeClient)
     assert client.apiUrl == "https://girder.example/api/v1"
-    assert client.auth_calls == ["secret"]
+    assert client.apiKey == "secret"
+    assert "User-Agent" in client.session.headers

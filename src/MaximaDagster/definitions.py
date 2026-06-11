@@ -1,8 +1,10 @@
+import os
 from dagster import Definitions, define_asset_job
-from .resources import GirderClient
-from .assets import *
+
+from .assets import xrd_raw, calibration_model, poni, azimuthal_integration
 from .sensors import xrd_experiment_sensor, xrd_calibration_sensor
-from .io_managers import sanitized_fs_io_manager
+from .resources import GirderConnection
+from .io_managers import GirderIOManager
 
 
 xrd = define_asset_job(
@@ -15,17 +17,20 @@ calibration_precompute = define_asset_job(
     selection=["calibration_model", "poni"],
 )
 
+girder_conn = GirderConnection(
+    api_url=os.environ.get("GIRDER_API_URL", ""),
+    api_key=os.environ.get("GIRDER_API_KEY", ""),
+)
+
 defs = Definitions(
     assets=[xrd_raw, calibration_model, poni, azimuthal_integration],
     jobs=[xrd, calibration_precompute],
     sensors=[xrd_experiment_sensor, xrd_calibration_sensor],
     resources={
-        "GirderClient": GirderClient.configured(
-            {
-                "api_url": {"env": "GIRDER_API_URL"},
-                "api_key": {"env": "GIRDER_API_KEY"},
-            }
+        "GirderConnection": girder_conn,
+        "io_manager": GirderIOManager(
+            base_dir=os.getenv("DAGSTER_STORAGE_DIR", "/tmp/dagster_storage"),
+            girder_connection=girder_conn
         ),
-        "io_manager": sanitized_fs_io_manager,
     },
 )
