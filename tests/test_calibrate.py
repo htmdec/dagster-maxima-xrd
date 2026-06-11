@@ -9,7 +9,7 @@ pytest.importorskip("pyFAI")
 pytest.importorskip("skimage")
 pytest.importorskip("scipy")
 
-from MaximaDagster.modules import calibrate
+from maxima_dagster.modules import calibrate
 
 
 def test_calibrate_image_builds_calibrator_with_expected_arguments(monkeypatch) -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from MaximaDagster import assets
+from maxima_dagster import assets
 
 
 def test_load_geometry_from_poni_uses_pyfai_integrator(monkeypatch) -> None:

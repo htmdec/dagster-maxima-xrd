@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 from dagster import build_asset_context
 
-from MaximaDagster import assets
-from MaximaDagster.contracts import GirderPayload, GirderPointer
+from maxima_dagster import assets
+from maxima_dagster.contracts import GirderPayload, GirderPointer
 
 
 def _write_test_h5(path: Path) -> None:

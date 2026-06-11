@@ -6,8 +6,8 @@ from typing import Any
 import pytest
 from dagster import AssetMaterialization, DagsterInstance, build_sensor_context
 
-import MaximaDagster.sensors as sensor_module
-from MaximaDagster.sensors import xrd_calibration_sensor, xrd_experiment_sensor
+import maxima_dagster.sensors as sensor_module
+from maxima_dagster.sensors import xrd_calibration_sensor, xrd_experiment_sensor
 
 
 EXPERIMENT_KEY_1 = "IGSN-1//2026-01-02T00:00:00+00:00"
