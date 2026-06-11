@@ -1,24 +1,50 @@
 from __future__ import annotations
 
-import pickle
+import io
+import json
+import re
 from pathlib import Path
-from typing import Union
+from typing import Any, Union
 
 from dagster import (
     ConfigurableIOManager,
-    Field,
-    InitResourceContext,
+    Failure,
     InputContext,
     OutputContext,
-    StringSource,
-    io_manager,
 )
 
+from .contracts import GirderPayload, GirderPointer
 
-class SanitizedFilesystemIOManager(ConfigurableIOManager):
+
+class GirderStream(io.BytesIO):
+    """
+    A subclass of io.BytesIO that seamlessly carries Girder tracking coordinates.
+    Acts exactly like a standard byte stream for scientific libraries, but allows
+    metadata helpers to inspect its origin tracking IDs.
+    """
+    def __init__(
+        self, 
+        initial_bytes: bytes = b"", 
+        file_id: str | None = None, 
+        item_id: str | None = None, 
+        metadata: dict[str, Any] | None = None
+    ):
+        super().__init__(initial_bytes)
+        self.file_id = file_id
+        self.item_id = item_id
+        self.metadata = metadata or {}
+
+
+class GirderIOManager(ConfigurableIOManager):
+    """
+    Manages asset execution boundaries. Handles automated network uploading for
+    outputs, pointer serialization for local tracking, and automatic partition key
+    resolution for direct Girder file downloading.
+    """
     base_dir: str
 
     def _get_path(self, context: Union[InputContext, OutputContext]) -> Path:
+        """Determines the local path for storing lightweight pointer files."""
         base_dir = Path(self.base_dir)
         if context.has_asset_key and context.asset_key:
             path_parts = list(context.asset_key.path)
@@ -29,22 +55,160 @@ class SanitizedFilesystemIOManager(ConfigurableIOManager):
                 context.asset_partition_key.replace(":", "-").replace("/", "-")
             )
             path_parts.append(sanitized_partition)
-        return base_dir.joinpath(*path_parts)
+        return base_dir.joinpath(*path_parts).with_suffix(".json")
 
-    def handle_output(self, context: OutputContext, obj: object) -> None:
+    def handle_output(self, context: OutputContext, obj: Any) -> None:
+        """Processes outputs by streaming them to Girder and caching tracking metadata."""
+        conn = context.resources.GirderConnection
+
+        if isinstance(obj, GirderPayload):
+            pointer = self._upload_payload(conn, obj)
+            serialized = {
+                "type": "pointer",
+                "data": {"file_id": pointer.file_id, "metadata": pointer.metadata}
+            }
+        elif isinstance(obj, dict):
+            serialized_dict = {}
+            for k, v in obj.items():
+                if isinstance(v, GirderPayload):
+                    pointer = self._upload_payload(conn, v)
+                    serialized_dict[str(k)] = {"file_id": pointer.file_id, "metadata": pointer.metadata}
+                elif isinstance(v, GirderPointer):
+                    serialized_dict[str(k)] = {"file_id": v.file_id, "metadata": v.metadata}
+                else:
+                    serialized_dict[str(k)] = v
+            serialized = {"type": "dict_of_pointers", "data": serialized_dict}
+        else:
+            raise Failure(f"Unsupported output type for GirderIOManager: {type(obj)}")
+
         output_path = self._get_path(context)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open("wb") as handle:
-            pickle.dump(obj, handle)
+        with output_path.open("w") as f:
+            json.dump(serialized, f, indent=2)
 
-    def load_input(self, context: InputContext) -> object:
+    def _upload_payload(self, conn: Any, payload: GirderPayload) -> GirderPointer:
+        """Helper to stream bytes to the server and update item metadata fields."""
+        file_info = conn.upload_file_to_folder(
+            folder_id=payload.folder_id,
+            stream=payload.stream,
+            filename=payload.filename,
+            mime_type=payload.mime_type,
+        )
+        file_id = file_info["_id"]
+        item_id = file_info.get("itemId") or file_info.get("parentId")
+
+        if item_id and payload.metadata:
+            conn.client.addMetadataToItem(item_id, payload.metadata)
+
+        return GirderPointer(file_id=file_id, metadata=payload.metadata)
+
+    def load_input(self, context: InputContext) -> Any:
+        """Loads inputs either from cached tracking files or dynamic Girder queries."""
+        conn = context.resources.GirderConnection
         input_path = self._get_path(context)
-        with input_path.open("rb") as handle:
-            return pickle.load(handle)
 
+        if input_path.exists():
+            with input_path.open("r") as f:
+                serialized = json.load(f)
 
-@io_manager(config_schema={"base_dir": Field(StringSource, is_required=False)})
-def sanitized_fs_io_manager(init_context: InitResourceContext) -> SanitizedFilesystemIOManager:
-    configured_base_dir = init_context.resource_config.get("base_dir")
-    base_dir = configured_base_dir or init_context.instance.storage_directory()
-    return SanitizedFilesystemIOManager(base_dir=base_dir)
+            if serialized["type"] == "pointer":
+                data = serialized["data"]
+                return self._download_to_stream(conn, data["file_id"], data["metadata"])
+            
+            elif serialized["type"] == "dict_of_pointers":
+                result_dict = {}
+                for k, v in serialized["data"].items():
+                    if isinstance(v, dict) and "file_id" in v:
+                        result_dict[k] = self._download_to_stream(conn, v["file_id"], v.get("metadata", {}))
+                    else:
+                        result_dict[k] = v
+                return result_dict
+
+        if context.has_asset_partitions:
+            partition_key = context.asset_partition_key
+            asset_name = context.asset_key.path[-1]
+
+            if asset_name == "xrd_raw":
+                return self._resolve_raw_xrd_partition(conn, partition_key)
+            elif asset_name == "calibration_model":
+                return self._resolve_calibration_partition(conn, partition_key)
+
+        raise Failure(
+            f"Could not load input for asset {context.asset_key.to_string()}. "
+            f"No tracking token found and no fallback resolution matches."
+        )
+
+    def _download_to_stream(self, conn: Any, file_id: str, metadata: dict[str, Any]) -> GirderStream:
+        """Downloads a file and bundles it into a metadata-enriched GirderStream."""
+        raw_stream = conn.get_stream(file_id)
+        
+        item_id = metadata.get("item_id")
+        if not item_id:
+            try:
+                file_info = conn.client.get(f"file/{file_id}")
+                item_id = file_info.get("itemId")
+            except Exception:
+                item_id = None
+
+        return GirderStream(
+            raw_stream.getvalue(),
+            file_id=file_id,
+            item_id=item_id,
+            metadata=metadata,
+        )
+
+    def _resolve_xrd_partition(self, conn: Any, partition_key: str) -> dict[str, Any]:
+        """Resolves an external partition key directly into structured file streams."""
+        rows = conn.resolve_partition_details(partition_key, "xrd_raw")
+        if not rows:
+            raise Failure(f"No partition data found for key {partition_key} (xrd_raw)")
+
+        experiment_folder_id = None
+        scans_dict = {}
+
+        for row in rows:
+            if not experiment_folder_id:
+                experiment_folder_id = conn.get_folder_id(row)
+
+            file_id = row.get("fileId") or row.get("_id")
+            if row.get("_modelType") == "item":
+                files = list(conn.client.listFile(row["_id"]))
+                if files:
+                    file_id = files[0]["_id"]
+
+            if not file_id:
+                continue
+
+            fname = conn.get_fname(row) or ""
+            scan_id_match = re.search(r"\d+", fname)
+            if not scan_id_match:
+                continue
+            scan_id = scan_id_match.group(0)
+
+            igsn = conn.get_igsn(row)
+            stream = self._download_to_stream(conn, file_id, row.get("meta", {}))
+
+            scans_dict[scan_id] = {"xrd": stream, "igsn": igsn}
+
+        return {"experiment_folder_id": experiment_folder_id, "scans": scans_dict}
+
+    def _resolve_calibration_partition(self, conn: Any, partition_key: str) -> Any:
+        """Resolves an external calibration partition into accessible file streams."""
+        rows = conn.resolve_partition_details(partition_key, "calibration_model")
+        if not rows:
+            raise Failure(f"No partition data found for key {partition_key} (calibration_model)")
+
+        streams = []
+        for row in rows:
+            file_id = row.get("fileId")
+            if row.get("_modelType") == "item":
+                files = list(conn.client.listFile(row["_id"]))
+                if files:
+                    file_id = files[0]["_id"]
+            if file_id:
+                streams.append(self._download_to_stream(conn, file_id, row.get("meta", {})))
+
+        if not streams:
+            raise Failure(f"No files resolved for calibration partition: {partition_key}")
+
+        return streams[0] if len(streams) == 1 else streams

@@ -119,7 +119,7 @@ def test_azimuthal_integration_uploads_exact_metadata_shape(monkeypatch) -> None
 
     monkeypatch.setattr(assets, "upload_artifact", _fake_upload_artifact)
     monkeypatch.setattr(
-        assets.AzimuthalIntegrator,
+        assets.azimuthal_integrator,
         "integrate_dict",
         lambda xrd_scans, geometry: {
             0: pd.DataFrame({"q_nm^-1": [1.0], "intensity": [2.0]}),

@@ -13,13 +13,30 @@ from dagster import (
 )
 
 from .partition_mapping import parse_partition_datetime, select_closest_preceding_partition
-from .utils.discovery import (
-    get_base_parent_id,
-    get_base_parent_type,
-    call_with_retries,
-    fetch_partitions
-)
 
+def fetch_partitions(gc: Any, base_id: str, base_type: str, data_type: str, since: str) -> dict[str, str]:
+    response = gc.get(
+        f"aimdl/partition",
+        parameters={
+            "dataType": data_type,
+            "since": since,
+            "baseParentId": base_id,
+            "baseParentType": base_type,
+        },
+    )
+    if response is None:
+        return {}
+    if not isinstance(response, dict):
+        raise RuntimeError(f"Expected dict response from aimdl/partition")
+
+    normalized: dict[str, str] = {}
+    for key, checksum in response.items():
+        partition_key = str(key).strip()
+        checksum_text = str(checksum).strip()
+        if not partition_key or not checksum_text:
+            continue
+        normalized[partition_key] = checksum_text
+    return normalized
 
 def _parse_cursor_payload(cursor: str | None) -> dict[str, Any]:
     if not cursor:
@@ -74,14 +91,8 @@ PartitionGate = Callable[[SensorEvaluationContext, Any, str, str], bool]
 
 
 def _resolve_closest_calibrant_partition_key(gc: Any, experiment_partition_key: str) -> str | None:
-    base_id = get_base_parent_id()
-    base_type = get_base_parent_type()
-
-    calibrant_partitions = call_with_retries(
-        fetch_partitions,
+    calibrant_partitions = fetch_partitions(
         gc,
-        base_id=base_id,
-        base_type=base_type,
         data_type="xrd_calibrant_raw",
         since=_default_since(),
     )
@@ -145,27 +156,22 @@ def build_girder_partition_sensor(
         name=sensor_name,
         job_name=job_name,
         minimum_interval_seconds=30,
-        required_resource_keys={"GirderClient"},
+        required_resource_keys={"GirderConnection"},
     )
     def _generic_sensor(
         context: SensorEvaluationContext,
-        GirderClient: Any | None = None,
+        GirderConnection: Any | None = None,
     ) -> SensorResult:
-        gc = GirderClient or context.resources.GirderClient
+        gc = GirderConnection or context.resources.GirderConnection
 
-        base_id = get_base_parent_id()
-        base_type = get_base_parent_type()
         since, checksums_by_partition = _parse_girder_cursor(context.cursor)
         poll_since = since or _default_since()
 
-        partition_updates = call_with_retries(
-            fetch_partitions,
-            gc,
-            base_id=base_id,
-            base_type=base_type,
-            data_type=data_type,
+        partition_updates = fetch_partitions(
+            gc, 
+            data_type=data_type, 
             since=poll_since,
-        )
+            )
 
         changed_partition_keys = [
             partition_key
