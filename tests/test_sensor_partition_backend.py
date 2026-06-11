@@ -44,7 +44,7 @@ class _PartitionConnection:
 
 @pytest.fixture(autouse=True)
 def _patch_fetch_partitions(monkeypatch):
-    def _fake_fetch_partitions(gc: Any, data_type: str, since: str) -> dict[str, str]:
+    def _fake_fetch_partitions(gc: Any, data_type: str, since: str, base_id: str | None = None, base_type: str | None = None) -> dict[str, str]:
         _ = since
         return dict(gc.responses_by_data_type.get(data_type, {}))
 
