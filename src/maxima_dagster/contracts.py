@@ -49,7 +49,7 @@ def build_item_link(girder_url: str, item_id: str) -> str:
 
 def build_prov_metadata(run_id: str | None) -> dict[str, Any]:
     return {
-        "workflow_version": version("MaximaDagster"),
+        "workflow_version": version("maxima_dagster"),
         "run_id": run_id,
         "time": datetime.now(timezone.utc).isoformat(),
     }

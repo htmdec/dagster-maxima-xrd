@@ -1,4 +1,4 @@
-from MaximaDagster import resources
+from maxima_dagster import resources
 
 
 class _FakeClient:

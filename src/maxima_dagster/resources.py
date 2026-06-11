@@ -50,7 +50,7 @@ class GirderConnection(ConfigurableResource):
             req_version = "unknown"
         session.headers.update({
             "User-Agent": (
-                f"maxima-dagster/{version('MaximaDagster')} "
+                f"maxima-dagster/{version('maxima-dagster')} "
                 f"girder-client/{gc_version} "
                 f"python-requests/{req_version}"
             )

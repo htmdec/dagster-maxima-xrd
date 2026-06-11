@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dagster import DagsterInstance
 
-from MaximaDagster.partition_mapping import ClosestPrecedingPartitionMapping
-from MaximaDagster.sensors import calibrant_partitions, experiment_partitions
+from maxima_dagster.partition_mapping import ClosestPrecedingPartitionMapping
+from maxima_dagster.sensors import calibrant_partitions, experiment_partitions
 
 
 def test_partition_mapping_selects_closest_preceding_calibrant() -> None:

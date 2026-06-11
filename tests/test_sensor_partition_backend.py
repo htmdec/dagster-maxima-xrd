@@ -6,8 +6,8 @@ from typing import Any
 import pytest
 from dagster import AssetMaterialization, DagsterInstance, build_sensor_context
 
-import MaximaDagster.sensors as sensor_module
-from MaximaDagster.sensors import xrd_calibration_sensor, xrd_experiment_sensor
+import maxima_dagster.sensors as sensor_module
+from maxima_dagster.sensors import xrd_calibration_sensor, xrd_experiment_sensor
 
 
 EXPERIMENT_KEY_1 = "IGSN-1//2026-01-02T00:00:00+00:00"
@@ -44,7 +44,7 @@ class _PartitionConnection:
 
 @pytest.fixture(autouse=True)
 def _patch_fetch_partitions(monkeypatch):
-    def _fake_fetch_partitions(gc: Any, data_type: str, since: str) -> dict[str, str]:
+    def _fake_fetch_partitions(gc: Any, data_type: str, since: str, base_id: str | None = None, base_type: str | None = None) -> dict[str, str]:
         _ = since
         return dict(gc.responses_by_data_type.get(data_type, {}))
 

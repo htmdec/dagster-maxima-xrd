@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from MaximaDagster import sensors
+from maxima_dagster import sensors
 
 
 def test_parse_girder_cursor_handles_invalid_json() -> None:

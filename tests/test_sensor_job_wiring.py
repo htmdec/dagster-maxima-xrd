@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from MaximaDagster.definitions import defs
-from MaximaDagster.sensors import (
+from maxima_dagster.definitions import defs
+from maxima_dagster.sensors import (
     calibrant_partitions,
     experiment_partitions,
     xrd_calibration_sensor,

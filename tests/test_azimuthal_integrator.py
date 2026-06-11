@@ -6,7 +6,7 @@ import pytest
 pyfai = pytest.importorskip("pyFAI")
 fabio = pytest.importorskip("fabio")
 
-from MaximaDagster.modules import azimuthal_integrator as az
+from maxima_dagster.modules import azimuthal_integrator as az
 
 
 class _FakeAI:

@@ -1,5 +1,5 @@
 [project]
-name = "MaximaDagster"
+name = "maxima_dagster"
 requires-python = ">=3.11,<3.15"
 version = "2026.6.1"
 dependencies = [
@@ -40,7 +40,7 @@ force-include = { "pyproject.toml" = "pyproject.toml" }
 directory_type = "project"
 
 [tool.dg.project]
-root_module = "MaximaDagster"
+root_module = "maxima_dagster"
 registry_modules = [
-    "MaximaDagster.components.*",
+    "maxima_dagster.components.*",
 ]
