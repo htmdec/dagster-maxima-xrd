@@ -14,6 +14,7 @@ from dagster import (
 )
 
 from .contracts import GirderPayload, GirderPointer
+from .resources import GirderConnection
 
 
 class GirderStream(io.BytesIO):
@@ -42,6 +43,7 @@ class GirderIOManager(ConfigurableIOManager):
     resolution for direct Girder file downloading.
     """
     base_dir: str
+    girder_connection: GirderConnection
 
     def _get_path(self, context: Union[InputContext, OutputContext]) -> Path:
         """Determines the local path for storing lightweight pointer files."""
@@ -56,30 +58,41 @@ class GirderIOManager(ConfigurableIOManager):
             )
             path_parts.append(sanitized_partition)
         return base_dir.joinpath(*path_parts).with_suffix(".json")
+    
+    def _serialize_obj(self, conn: Any, obj: Any) -> Any:
+        """Recursively traverses data structures, converting Payloads/Pointers to JSON-safe dicts."""
+        if isinstance(obj, GirderPayload):
+            pointer = self._upload_payload(conn, obj)
+            return {"_type": "GirderPointer", "file_id": pointer.file_id, "metadata": pointer.metadata}
+        elif isinstance(obj, GirderPointer):
+            return {"_type": "GirderPointer", "file_id": obj.file_id, "metadata": obj.metadata}
+        elif isinstance(obj, dict):
+            return {k: self._serialize_obj(conn, v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._serialize_obj(conn, v) for v in obj]
+        else:
+            return obj
+
+    def _deserialize_obj(self, conn: Any, obj: Any) -> Any:
+        """Recursively traverses data structures, converting serialized Pointers back into GirderStreams."""
+        if isinstance(obj, dict):
+            if obj.get("_type") == "GirderPointer":
+                return self._download_to_stream(conn, obj["file_id"], obj.get("metadata", {}))
+            return {k: self._deserialize_obj(conn, v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._deserialize_obj(conn, v) for v in obj]
+        else:
+            return obj
 
     def handle_output(self, context: OutputContext, obj: Any) -> None:
         """Processes outputs by streaming them to Girder and caching tracking metadata."""
-        conn = context.resources.GirderConnection
+        conn = self.girder_connection
 
-        if isinstance(obj, GirderPayload):
-            pointer = self._upload_payload(conn, obj)
-            serialized = {
-                "type": "pointer",
-                "data": {"file_id": pointer.file_id, "metadata": pointer.metadata}
-            }
-        elif isinstance(obj, dict):
-            serialized_dict = {}
-            for k, v in obj.items():
-                if isinstance(v, GirderPayload):
-                    pointer = self._upload_payload(conn, v)
-                    serialized_dict[str(k)] = {"file_id": pointer.file_id, "metadata": pointer.metadata}
-                elif isinstance(v, GirderPointer):
-                    serialized_dict[str(k)] = {"file_id": v.file_id, "metadata": v.metadata}
-                else:
-                    serialized_dict[str(k)] = v
-            serialized = {"type": "dict_of_pointers", "data": serialized_dict}
-        else:
-            raise Failure(f"Unsupported output type for GirderIOManager: {type(obj)}")
+        serialized_data = self._serialize_obj(conn, obj)
+        serialized = {
+            "type": "recursive_tree",
+            "data": serialized_data
+        }
 
         output_path = self._get_path(context)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,17 +117,19 @@ class GirderIOManager(ConfigurableIOManager):
 
     def load_input(self, context: InputContext) -> Any:
         """Loads inputs either from cached tracking files or dynamic Girder queries."""
-        conn = context.resources.GirderConnection
+        conn = self.girder_connection
         input_path = self._get_path(context)
 
         if input_path.exists():
             with input_path.open("r") as f:
                 serialized = json.load(f)
 
-            if serialized["type"] == "pointer":
-                data = serialized["data"]
-                return self._download_to_stream(conn, data["file_id"], data["metadata"])
+            if serialized["type"] == "recursive_tree":
+                return self._deserialize_obj(conn, serialized["data"])
             
+            elif serialized["type"] == "pointer":
+                data = serialized["data"]
+                return self._download_to_stream(conn, data["file_id"], data.get("metadata", {}))
             elif serialized["type"] == "dict_of_pointers":
                 result_dict = {}
                 for k, v in serialized["data"].items():

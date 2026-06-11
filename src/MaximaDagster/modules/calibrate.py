@@ -11,6 +11,7 @@ Classes:
 """
 
 import numpy as np
+import io
 import torch
 import torch.nn as nn
 from torchvision import transforms
@@ -161,7 +162,7 @@ class MaximaCalibrator:
         device (str, optional): Computation device ('cpu' or 'cuda'). Defaults to auto-detect.
     """
     def __init__(self, 
-                 model_path: str, 
+                 model_src: str | io.BytesIO, 
                  calibrant: str = 'alpha_Al2O3', 
                  detector: str = 'Eiger2Cdte_1M', 
                  energy: float = None,
@@ -171,7 +172,7 @@ class MaximaCalibrator:
                  hidden_dim: int = 1024,
                  device: str = None):
         
-        self.model_path = model_path
+        self.model_src = model_src
         self.calibrant_alias = calibrant
         self.detector_alias = detector
         self.wavelength = resolve_wavelength(energy=energy, wavelength=wavelength)
@@ -215,9 +216,14 @@ class MaximaCalibrator:
         return MaximaSwin(backbone, head)
 
     def _load_weights(self):
-        """Loads state dict from the checkpoint file."""
-        print(f"Loading weights from: {self.model_path}")
-        state_dict = torch.load(self.model_path, map_location='cpu')
+        """Loads state dict from the checkpoint file or stream."""
+        if isinstance(self.model_src, str):
+            print(f"Loading weights from: {self.model_src}")
+        else:
+            print("Loading weights directly from in-memory stream")
+            self.model_src.seek(0)
+            
+        state_dict = torch.load(self.model_src, map_location='cpu')
         try:
             self.model.load_state_dict(state_dict, strict=True)
         except RuntimeError as e:

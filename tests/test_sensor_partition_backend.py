@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
 from dagster import AssetMaterialization, DagsterInstance, build_sensor_context
 
+import MaximaDagster.sensors as sensor_module
 from MaximaDagster.sensors import xrd_calibration_sensor, xrd_experiment_sensor
 
 
@@ -34,17 +36,32 @@ class _PartitionClient:
         return dict(self.responses_by_data_type.get(data_type, {}))
 
 
+class _PartitionConnection:
+    def __init__(self, responses_by_data_type: dict[str, dict[str, str]]) -> None:
+        self.responses_by_data_type = responses_by_data_type
+        self.client = _PartitionClient(responses_by_data_type)
+
+
+@pytest.fixture(autouse=True)
+def _patch_fetch_partitions(monkeypatch):
+    def _fake_fetch_partitions(gc: Any, data_type: str, since: str) -> dict[str, str]:
+        _ = since
+        return dict(gc.responses_by_data_type.get(data_type, {}))
+
+    monkeypatch.setattr(sensor_module, "fetch_partitions", _fake_fetch_partitions)
+
+
 def test_xrd_sensor_bootstrap_sets_cursor_without_runs() -> None:
     with DagsterInstance.ephemeral() as instance:
         _materialize_poni(instance, CALIBRANT_KEY_1)
-        client = _PartitionClient(
+        connection = _PartitionConnection(
             {
                 "xrd_raw": {EXPERIMENT_KEY_1: "chk_1"},
                 "xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"},
             }
         )
 
-        context = build_sensor_context(resources={"GirderClient": client}, instance=instance)
+        context = build_sensor_context(resources={"GirderConnection": connection}, instance=instance)
         evaluation = xrd_experiment_sensor(context)
 
     assert evaluation.run_requests == []
@@ -58,23 +75,23 @@ def test_xrd_sensor_bootstrap_sets_cursor_without_runs() -> None:
 def test_xrd_sensor_checksum_change_triggers_run() -> None:
     with DagsterInstance.ephemeral() as instance:
         _materialize_poni(instance, CALIBRANT_KEY_1)
-        seed_client = _PartitionClient(
+        seed_connection = _PartitionConnection(
             {
                 "xrd_raw": {EXPERIMENT_KEY_1: "chk_1"},
                 "xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"},
             }
         )
-        seed_context = build_sensor_context(resources={"GirderClient": seed_client}, instance=instance)
+        seed_context = build_sensor_context(resources={"GirderConnection": seed_connection}, instance=instance)
         seed = xrd_experiment_sensor(seed_context)
 
-        next_client = _PartitionClient(
+        next_connection = _PartitionConnection(
             {
                 "xrd_raw": {EXPERIMENT_KEY_1: "chk_2"},
                 "xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"},
             }
         )
         next_context = build_sensor_context(
-            resources={"GirderClient": next_client},
+            resources={"GirderConnection": next_connection},
             cursor=seed.cursor,
             instance=instance,
         )
@@ -96,23 +113,23 @@ def test_xrd_sensor_checksum_change_triggers_run() -> None:
 def test_xrd_sensor_unchanged_checksum_emits_no_runs() -> None:
     with DagsterInstance.ephemeral() as instance:
         _materialize_poni(instance, CALIBRANT_KEY_1)
-        seed_client = _PartitionClient(
+        seed_connection = _PartitionConnection(
             {
                 "xrd_raw": {EXPERIMENT_KEY_1: "chk_1"},
                 "xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"},
             }
         )
-        seed_context = build_sensor_context(resources={"GirderClient": seed_client}, instance=instance)
+        seed_context = build_sensor_context(resources={"GirderConnection": seed_connection}, instance=instance)
         seed = xrd_experiment_sensor(seed_context)
 
-        next_client = _PartitionClient(
+        next_connection = _PartitionConnection(
             {
                 "xrd_raw": {EXPERIMENT_KEY_1: "chk_1"},
                 "xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"},
             }
         )
         next_context = build_sensor_context(
-            resources={"GirderClient": next_client},
+            resources={"GirderConnection": next_connection},
             cursor=seed.cursor,
             instance=instance,
         )
@@ -126,7 +143,7 @@ def test_xrd_sensor_new_partition_adds_only_new_partition() -> None:
     with DagsterInstance.ephemeral() as instance:
         _materialize_poni(instance, CALIBRANT_KEY_1)
         _materialize_poni(instance, CALIBRANT_KEY_2)
-        seed_client = _PartitionClient(
+        seed_connection = _PartitionConnection(
             {
                 "xrd_raw": {EXPERIMENT_KEY_1: "chk_1"},
                 "xrd_calibrant_raw": {
@@ -135,10 +152,10 @@ def test_xrd_sensor_new_partition_adds_only_new_partition() -> None:
                 },
             }
         )
-        seed_context = build_sensor_context(resources={"GirderClient": seed_client}, instance=instance)
+        seed_context = build_sensor_context(resources={"GirderConnection": seed_connection}, instance=instance)
         seed = xrd_experiment_sensor(seed_context)
 
-        next_client = _PartitionClient(
+        next_connection = _PartitionConnection(
             {
                 "xrd_raw": {
                     EXPERIMENT_KEY_1: "chk_1",
@@ -151,7 +168,7 @@ def test_xrd_sensor_new_partition_adds_only_new_partition() -> None:
             }
         )
         next_context = build_sensor_context(
-            resources={"GirderClient": next_client},
+            resources={"GirderConnection": next_connection},
             cursor=seed.cursor,
             instance=instance,
         )
@@ -165,14 +182,14 @@ def test_xrd_sensor_new_partition_adds_only_new_partition() -> None:
 
 def test_xrd_sensor_skips_when_poni_missing() -> None:
     with DagsterInstance.ephemeral() as instance:
-        client = _PartitionClient(
+        connection = _PartitionConnection(
             {
                 "xrd_raw": {EXPERIMENT_KEY_1: "chk_1"},
                 "xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"},
             }
         )
 
-        context = build_sensor_context(resources={"GirderClient": client}, instance=instance)
+        context = build_sensor_context(resources={"GirderConnection": connection}, instance=instance)
         evaluation = xrd_experiment_sensor(context)
 
     assert evaluation.run_requests == []
@@ -181,9 +198,9 @@ def test_xrd_sensor_skips_when_poni_missing() -> None:
 
 
 def test_calibration_sensor_bootstrap_sets_cursor_without_runs() -> None:
-    client = _PartitionClient({"xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"}})
+    connection = _PartitionConnection({"xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"}})
 
-    context = build_sensor_context(resources={"GirderClient": client})
+    context = build_sensor_context(resources={"GirderConnection": connection})
     evaluation = xrd_calibration_sensor(context)
 
     assert evaluation.run_requests == []
@@ -194,13 +211,13 @@ def test_calibration_sensor_bootstrap_sets_cursor_without_runs() -> None:
 
 def test_calibration_sensor_checksum_change_triggers_run() -> None:
     with DagsterInstance.ephemeral() as instance:
-        seed_client = _PartitionClient({"xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"}})
-        seed_context = build_sensor_context(resources={"GirderClient": seed_client}, instance=instance)
+        seed_connection = _PartitionConnection({"xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"}})
+        seed_context = build_sensor_context(resources={"GirderConnection": seed_connection}, instance=instance)
         seed = xrd_calibration_sensor(seed_context)
 
-        next_client = _PartitionClient({"xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_b"}})
+        next_connection = _PartitionConnection({"xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_b"}})
         next_context = build_sensor_context(
-            resources={"GirderClient": next_client},
+            resources={"GirderConnection": next_connection},
             cursor=seed.cursor,
             instance=instance,
         )

@@ -4,11 +4,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     DAGSTER_HOME=/opt/dagster/dagster_home \
+    DAGSTER_STORAGE_DIR=/opt/dagster/app/storage \
     PYTHONPATH=/opt/dagster/app/src
 
 WORKDIR /opt/dagster/app
 
-# Keep system deps minimal for scientific Python wheels on CPU images.
+# Keep system deps minimal for scientific Python wheels
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libgl1 \
@@ -22,12 +23,14 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY workspace.yaml ./workspace.yaml
 
+# Note: Explicitly installing CPU wheels to keep image size minimal
+# We can remove the --extra-index-url flag if CUDA support is available
 RUN python -m pip install --upgrade pip && \
     pip install --extra-index-url https://download.pytorch.org/whl/cpu torch==2.10.0 torchvision==0.25.0 && \
     pip install . && \
     pip install dagster-webserver==1.12.12 dagster-postgres==0.28.12
 
-RUN mkdir -p ${DAGSTER_HOME} /opt/dagster/app/data/models /opt/dagster/app/data/calibrations
+RUN mkdir -p ${DAGSTER_HOME} ${DAGSTER_STORAGE_DIR}
 
 EXPOSE 3000
 

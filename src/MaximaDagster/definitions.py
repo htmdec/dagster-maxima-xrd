@@ -17,17 +17,20 @@ calibration_precompute = define_asset_job(
     selection=["calibration_model", "poni"],
 )
 
+girder_conn = GirderConnection(
+    api_url=os.environ.get("GIRDER_API_URL", ""),
+    api_key=os.environ.get("GIRDER_API_KEY", ""),
+)
+
 defs = Definitions(
     assets=[xrd_raw, calibration_model, poni, azimuthal_integration],
     jobs=[xrd, calibration_precompute],
     sensors=[xrd_experiment_sensor, xrd_calibration_sensor],
     resources={
-        "GirderConnection": GirderConnection(
-            api_url=os.getenv("GIRDER_API_URL", ""),
-            api_key=os.getenv("GIRDER_API_KEY", ""),
-        ),
+        "GirderConnection": girder_conn,
         "io_manager": GirderIOManager(
-            base_dir=os.getenv("DAGSTER_STORAGE_DIR", "/tmp/dagster_storage")
+            base_dir=os.getenv("DAGSTER_STORAGE_DIR", "/tmp/dagster_storage"),
+            girder_connection=girder_conn
         ),
     },
 )

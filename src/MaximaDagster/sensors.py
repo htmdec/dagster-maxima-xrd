@@ -1,3 +1,4 @@
+import os
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -15,7 +16,7 @@ from dagster import (
 from .partition_mapping import parse_partition_datetime, select_closest_preceding_partition
 
 def fetch_partitions(gc: Any, base_id: str, base_type: str, data_type: str, since: str) -> dict[str, str]:
-    response = gc.get(
+    response = gc.client.get(
         f"aimdl/partition",
         parameters={
             "dataType": data_type,
@@ -95,6 +96,8 @@ def _resolve_closest_calibrant_partition_key(gc: Any, experiment_partition_key: 
         gc,
         data_type="xrd_calibrant_raw",
         since=_default_since(),
+        base_id = os.environ.get("BASE_PARENT_ID"),
+        base_type = os.environ.get("BASE_PARENT_TYPE"),
     )
     calibrant_keys = list(calibrant_partitions.keys())
     if not calibrant_keys:
@@ -171,6 +174,8 @@ def build_girder_partition_sensor(
             gc, 
             data_type=data_type, 
             since=poll_since,
+            base_id = os.environ.get("BASE_PARENT_ID"),
+            base_type = os.environ.get("BASE_PARENT_TYPE"),
             )
 
         changed_partition_keys = [

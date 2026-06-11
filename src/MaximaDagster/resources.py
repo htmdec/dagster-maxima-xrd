@@ -2,7 +2,7 @@ import io
 import os
 import threading
 from contextlib import contextmanager
-from importlib.metadata import version
+from importlib.metadata import version, PackageNotFoundError
 from typing import Any, Generator
 
 from girder_client import GirderClient as gc
@@ -31,18 +31,28 @@ class GirderConnection(ConfigurableResource):
     api_url: str
     api_key: str
     
-    base_parent_id: str = "aimdl"
-    base_parent_type: str = "collection"
+    base_parent_id: str = os.getenv("BASE_PARENT_ID")
+    base_parent_type: str = os.getenv("BASE_PARENT_TYPE")
     
     _client: GirderClientWithSession | None = PrivateAttr(default=None)
 
     def _make_client(self) -> GirderClientWithSession:
         session = requests.Session()
+
+        try:
+            gc_version = version("girder-client")
+        except PackageNotFoundError:
+            gc_version = "unknown"
+            
+        try:
+            req_version = version("requests")
+        except PackageNotFoundError:
+            req_version = "unknown"
         session.headers.update({
             "User-Agent": (
                 f"maxima-dagster/{version('MaximaDagster')} "
-                f"girder-client/{gc.__version__} "
-                f"python-requests/{requests.__version__}"
+                f"girder-client/{gc_version} "
+                f"python-requests/{req_version}"
             )
         })
         

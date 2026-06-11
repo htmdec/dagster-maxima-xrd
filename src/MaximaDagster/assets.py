@@ -31,10 +31,11 @@ from .contracts import (
 
 def load_geometry_from_mem(poni_bytes: bytes) -> Geometry:
     ai = PyFAIAzimuthalIntegrator()
-    with tempfile.NamedTemporaryFile(suffix=".poni", delete=True) as tmp:
-        tmp.write(poni_bytes)
-        tmp.flush()
-        ai.load(tmp.name)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        poni_path = Path(tmpdir) / "temp.poni"
+        poni_path.write_bytes(poni_bytes)
+
+        ai.load(str(poni_path))
     
     return Geometry(
         dist=ai.dist,
@@ -56,11 +57,11 @@ def calibration_model(context: AssetExecutionContext) -> GirderPointer:
     if not model_item_id:
         raise ValueError("GIRDER_MODEL_ITEM_ID is not configured.")
 
-    item_info = conn.getItem(model_item_id)
+    item_info = conn.client.getItem(model_item_id)
     meta = item_info.get("meta", {})
     meta_fields = meta.get("params") if isinstance(meta.get("params"), dict) else meta
 
-    item_files = list(conn.listFile(item_info["_id"]))
+    item_files = list(conn.client.listFile(item_info["_id"]))
     pth_files = [f for f in item_files if f["name"].lower().endswith(".pth")]
 
     if not pth_files:
@@ -106,6 +107,9 @@ def poni(
     calibrant_fname = conn.get_fname(target_row)
     folder_id = conn.get_folder_id(target_row)
     item_id = conn.get_item_id(target_row)
+
+    item_info = conn.client.getItem(item_id)
+    exp_date = item_info.get("meta", {}).get("experiment_date")
     
     files = list(conn.client.listFile(item_id))
     h5_file_id = next((f["_id"] for f in files if str(f["name"]).lower().endswith(".h5")), None)
@@ -117,7 +121,7 @@ def poni(
     model_metadata = calibration_model.metadata
 
     calibrator = calibrate.MaximaCalibrator(
-        calibration_model["model_path"],
+        calibration_model,
         str(model_metadata["calibrant"]),
         str(model_metadata["detector"]),
         float(model_metadata["energy"]),
@@ -127,10 +131,10 @@ def poni(
 
     poni_file_name = Path(calibrant_fname).stem + ".poni"
 
-    with tempfile.NamedTemporaryFile(suffix=".poni", delete=True) as tmp:    # pyFAI expects a file path, it seems like a C-level requirement, so I believe we have to write to disk here 
-        geometry.save(tmp.name)
-        tmp.seek(0)
-        poni_bytes = tmp.read()
+    with tempfile.TemporaryDirectory() as tmpdir:    # pyFAI expects a file path, it seems like a C-level requirement, so I believe we have to write to disk here 
+        poni_path = Path(tmpdir) / "temp.poni"
+        geometry.save(str(poni_path))
+        poni_bytes = poni_path.read_bytes()
 
     metadata = {
         "prov": build_prov_metadata(run_id),
@@ -145,6 +149,7 @@ def poni(
             igsn=conn.get_igsn(target_row),
         ),
         "data_type": "xrd_calibrant_derived",
+        "experiment_date": exp_date,
     }
 
     context.log.info(f"Generated new PONI geometry for {partition_key}")
@@ -173,24 +178,27 @@ def xrd_raw(context: AssetExecutionContext) -> dict[str, Any]:
         if not fname or not h5_match:
             continue
 
-        if not experiment_folder_id:
+        if not folder_id:
             raw_folder_id = conn.get_folder_id(row)
             raw_folder = conn.client.getFolder(raw_folder_id)
-            experiment_folder_id = str(raw_folder.get("parentId", ""))
+            folder_id = str(raw_folder.get("parentId", ""))
 
         item_id = conn.get_item_id(row)
+        item_info = conn.client.getItem(item_id)
+        exp_date = item_info.get("meta", {}).get("experiment_date")
+
         files = list(conn.client.listFile(item_id))
         file_id = next((f["_id"] for f in files if str(f["name"]).lower().endswith(".h5")), None)
 
         if file_id:
             scan_num = int(h5_match.group(1))
-            pointer_meta = {"item_id": item_id, "igsn": conn.get_igsn(row)}
+            pointer_meta = {"item_id": item_id, "igsn": conn.get_igsn(row), "experiment_date": exp_date}
             scans[scan_num] = {"xrd": GirderPointer(file_id=file_id, metadata=pointer_meta)}
 
     context.log.info(f"Mapped {len(scans)} scan(s) to pointers.")
     
     return {
-        "experiment_folder_id": experiment_folder_id,
+        "experiment_folder_id": folder_id,
         "scans": scans,
     }
 
@@ -208,7 +216,7 @@ def azimuthal_integration(
     run_id = str(context.run.run_id)
     girder_url = str(os.getenv("GIRDER_API_URL") or "")
     
-    experiment_folder_id = xrd_raw["experiment_folder_id"]
+    folder_id = xrd_raw["experiment_folder_id"]
     scans = xrd_raw["scans"]
 
     geometry = load_geometry_from_mem(poni.getvalue())
@@ -234,14 +242,17 @@ def azimuthal_integration(
     payloads = {}
     for scan_id, dataframe in results.items():
         csv_bytes = dataframe.to_csv(index=False).encode("utf-8")
+
+        scan_id_str = str(scan_id)
         
-        igsn = scans[scan_id]["xrd"].metadata.get("igsn")
-        item_meta = {**ai_metadata_base, "igsn": igsn} if igsn else ai_metadata_base
+        igsn = scans[scan_id_str]["xrd"].metadata.get("igsn")
+        exp_date = scans[scan_id_str]["xrd"].metadata.get("experiment_date")
+        item_meta = {**ai_metadata_base, "igsn": igsn, "experiment_date": exp_date} if igsn else ai_metadata_base
 
         payloads[scan_id] = GirderPayload(
             stream=io.BytesIO(csv_bytes),
             filename=f"scan_point_{int(scan_id)}_azimuthal.csv",
-            folder_id=experiment_folder_id,
+            folder_id=folder_id,
             mime_type="text/csv",
             metadata=item_meta,
         )
