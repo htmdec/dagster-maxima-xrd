@@ -4,7 +4,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     DAGSTER_HOME=/opt/dagster/dagster_home \
-    DAGSTER_STORAGE_DIR=/opt/dagster/app/storage \
     PYTHONPATH=/opt/dagster/app/src
 
 WORKDIR /opt/dagster/app
@@ -30,7 +29,7 @@ RUN python -m pip install --upgrade pip && \
     pip install . && \
     pip install dagster-webserver==1.12.12 dagster-postgres==0.28.12
 
-RUN mkdir -p ${DAGSTER_HOME} ${DAGSTER_STORAGE_DIR}
+RUN mkdir -p ${DAGSTER_HOME}
 
 EXPOSE 3000
 

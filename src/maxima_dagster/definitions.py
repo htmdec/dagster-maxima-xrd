@@ -29,7 +29,7 @@ defs = Definitions(
     resources={
         "GirderConnection": girder_conn,
         "io_manager": GirderIOManager(
-            base_dir=os.getenv("DAGSTER_STORAGE_DIR", "/tmp/dagster_storage"),
+            storage_folder_id=os.getenv("GIRDER_STORAGE_FOLDER_ID", ""),
             girder_connection=girder_conn
         ),
     },

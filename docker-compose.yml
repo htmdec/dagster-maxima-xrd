@@ -20,17 +20,16 @@ services:
     command: ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-w", "/opt/dagster/app/workspace.yaml"]
     environment:
       DAGSTER_HOME: /opt/dagster/dagster_home
-      DAGSTER_STORAGE_DIR: /opt/dagster/app/storage
       GIRDER_API_URL: ${GIRDER_API_URL}
       GIRDER_API_KEY: ${GIRDER_API_KEY}
       GIRDER_MODEL_ITEM_ID: ${GIRDER_MODEL_ITEM_ID}
+      GIRDER_STORAGE_FOLDER_ID: ${GIRDER_STORAGE_FOLDER_ID}
       BASE_PARENT_ID: ${BASE_PARENT_ID}
       BASE_PARENT_TYPE: ${BASE_PARENT_TYPE}
     ports:
       - "3000:3000"
     volumes:
       - ./dagster_home:/opt/dagster/dagster_home
-      - ./dagster_storage:/opt/dagster/app/storage
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,7 +41,7 @@ services:
     command: ["dagster-daemon", "run", "--code-server-log-level", "error", "-w", "/opt/dagster/app/workspace.yaml"]
     environment:
       DAGSTER_HOME: /opt/dagster/dagster_home
-      DAGSTER_STORAGE_DIR: /opt/dagster/app/storage
+      GIRDER_STORAGE_FOLDER_ID: ${GIRDER_STORAGE_FOLDER_ID}
       GIRDER_API_URL: ${GIRDER_API_URL}
       GIRDER_API_KEY: ${GIRDER_API_KEY}
       GIRDER_MODEL_ITEM_ID: ${GIRDER_MODEL_ITEM_ID}
@@ -50,7 +49,6 @@ services:
       BASE_PARENT_TYPE: ${BASE_PARENT_TYPE}
     volumes:
       - ./dagster_home:/opt/dagster/dagster_home
-      - ./dagster_storage:/opt/dagster/app/storage
     depends_on:
       postgres:
         condition: service_healthy

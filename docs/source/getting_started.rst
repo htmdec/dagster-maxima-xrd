@@ -25,8 +25,7 @@ Required variables:
 
 - GIRDER_API_URL
 - GIRDER_API_KEY
-- GIRDER_ROOT_FOLDER_ID
-- GIRDER_CALIBRANTS_FOLDER_ID
+- GIRDER_STORAGE_FOLDER_ID
 - GIRDER_MODEL_ITEM_ID
 
 Optional discovery tuning variables:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import json
 import re
-from pathlib import Path
 from typing import Any, Union
 
 from dagster import (
@@ -23,12 +22,13 @@ class GirderStream(io.BytesIO):
     Acts exactly like a standard byte stream for scientific libraries, but allows
     metadata helpers to inspect its origin tracking IDs.
     """
+
     def __init__(
-        self, 
-        initial_bytes: bytes = b"", 
-        file_id: str | None = None, 
-        item_id: str | None = None, 
-        metadata: dict[str, Any] | None = None
+        self,
+        initial_bytes: bytes = b"",
+        file_id: str | None = None,
+        item_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         super().__init__(initial_bytes)
         self.file_id = file_id
@@ -42,30 +42,38 @@ class GirderIOManager(ConfigurableIOManager):
     outputs, pointer serialization for local tracking, and automatic partition key
     resolution for direct Girder file downloading.
     """
-    base_dir: str
+
+    storage_folder_id: str
     girder_connection: GirderConnection
 
-    def _get_path(self, context: Union[InputContext, OutputContext]) -> Path:
+    def _get_path(self, context: Union[InputContext, OutputContext]) -> str:
         """Determines the local path for storing lightweight pointer files."""
-        base_dir = Path(self.base_dir)
         if context.has_asset_key and context.asset_key:
             path_parts = list(context.asset_key.path)
         else:
             path_parts = [part for part in [context.step_key, context.name] if part]
         if context.has_asset_partitions:
-            sanitized_partition = (
-                context.asset_partition_key.replace(":", "-").replace("/", "-")
+            sanitized_partition = context.asset_partition_key.replace(":", "-").replace(
+                "/", "-"
             )
             path_parts.append(sanitized_partition)
-        return base_dir.joinpath(*path_parts).with_suffix(".json")
-    
+        return "_".join(path_parts) + ".json"
+
     def _serialize_obj(self, conn: Any, obj: Any) -> Any:
         """Recursively traverses data structures, converting Payloads/Pointers to JSON-safe dicts."""
         if isinstance(obj, GirderPayload):
             pointer = self._upload_payload(conn, obj)
-            return {"_type": "GirderPointer", "file_id": pointer.file_id, "metadata": pointer.metadata}
+            return {
+                "_type": "GirderPointer",
+                "file_id": pointer.file_id,
+                "metadata": pointer.metadata,
+            }
         elif isinstance(obj, GirderPointer):
-            return {"_type": "GirderPointer", "file_id": obj.file_id, "metadata": obj.metadata}
+            return {
+                "_type": "GirderPointer",
+                "file_id": obj.file_id,
+                "metadata": obj.metadata,
+            }
         elif isinstance(obj, dict):
             return {k: self._serialize_obj(conn, v) for k, v in obj.items()}
         elif isinstance(obj, list):
@@ -77,7 +85,9 @@ class GirderIOManager(ConfigurableIOManager):
         """Recursively traverses data structures, converting serialized Pointers back into GirderStreams."""
         if isinstance(obj, dict):
             if obj.get("_type") == "GirderPointer":
-                return self._download_to_stream(conn, obj["file_id"], obj.get("metadata", {}))
+                return self._download_to_stream(
+                    conn, obj["file_id"], obj.get("metadata", {})
+                )
             return {k: self._deserialize_obj(conn, v) for k, v in obj.items()}
         elif isinstance(obj, list):
             return [self._deserialize_obj(conn, v) for v in obj]
@@ -89,15 +99,13 @@ class GirderIOManager(ConfigurableIOManager):
         conn = self.girder_connection
 
         serialized_data = self._serialize_obj(conn, obj)
-        serialized = {
-            "type": "recursive_tree",
-            "data": serialized_data
-        }
+        serialized = {"type": "recursive_tree", "data": serialized_data}
 
-        output_path = self._get_path(context)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open("w") as f:
-            json.dump(serialized, f, indent=2)
+        filename = self._get_path(context)
+        buffer = io.BytesIO(json.dumps(serialized).encode("utf-8"))
+        conn.upload_file_to_folder(
+            self.storage_folder_id, buffer, filename, mime_type="application/json"
+        )
 
     def _upload_payload(self, conn: Any, payload: GirderPayload) -> GirderPointer:
         """Helper to stream bytes to the server and update item metadata fields."""
@@ -118,23 +126,40 @@ class GirderIOManager(ConfigurableIOManager):
     def load_input(self, context: InputContext) -> Any:
         """Loads inputs either from cached tracking files or dynamic Girder queries."""
         conn = self.girder_connection
-        input_path = self._get_path(context)
+        filename = self._get_path(context)
 
-        if input_path.exists():
-            with input_path.open("r") as f:
-                serialized = json.load(f)
+        item = None
+        children = conn.client.listItem(self.storage_folder_id, name=filename)
+        try:
+            item = next(children)
+        except StopIteration:
+            pass
+
+        if item:
+            with conn.client.sendRestRequest(
+                "get", f"item/{item['_id']}/download", stream=True, jsonResp=False
+            ) as stream:
+                buffer = io.BytesIO()
+                for chunk in stream.iter_content(chunk_size=65536):
+                    buffer.write(chunk)
+                buffer.seek(0)
+                serialized = json.loads(buffer.getvalue().decode("utf-8"))
 
             if serialized["type"] == "recursive_tree":
                 return self._deserialize_obj(conn, serialized["data"])
-            
+
             elif serialized["type"] == "pointer":
                 data = serialized["data"]
-                return self._download_to_stream(conn, data["file_id"], data.get("metadata", {}))
+                return self._download_to_stream(
+                    conn, data["file_id"], data.get("metadata", {})
+                )
             elif serialized["type"] == "dict_of_pointers":
                 result_dict = {}
                 for k, v in serialized["data"].items():
                     if isinstance(v, dict) and "file_id" in v:
-                        result_dict[k] = self._download_to_stream(conn, v["file_id"], v.get("metadata", {}))
+                        result_dict[k] = self._download_to_stream(
+                            conn, v["file_id"], v.get("metadata", {})
+                        )
                     else:
                         result_dict[k] = v
                 return result_dict
@@ -153,10 +178,12 @@ class GirderIOManager(ConfigurableIOManager):
             f"No tracking token found and no fallback resolution matches."
         )
 
-    def _download_to_stream(self, conn: Any, file_id: str, metadata: dict[str, Any]) -> GirderStream:
+    def _download_to_stream(
+        self, conn: Any, file_id: str, metadata: dict[str, Any]
+    ) -> GirderStream:
         """Downloads a file and bundles it into a metadata-enriched GirderStream."""
         raw_stream = conn.get_stream(file_id)
-        
+
         item_id = metadata.get("item_id")
         if not item_id:
             try:
@@ -211,7 +238,9 @@ class GirderIOManager(ConfigurableIOManager):
         """Resolves an external calibration partition into accessible file streams."""
         rows = conn.resolve_partition_details(partition_key, "calibration_model")
         if not rows:
-            raise Failure(f"No partition data found for key {partition_key} (calibration_model)")
+            raise Failure(
+                f"No partition data found for key {partition_key} (calibration_model)"
+            )
 
         streams = []
         for row in rows:
@@ -221,9 +250,13 @@ class GirderIOManager(ConfigurableIOManager):
                 if files:
                     file_id = files[0]["_id"]
             if file_id:
-                streams.append(self._download_to_stream(conn, file_id, row.get("meta", {})))
+                streams.append(
+                    self._download_to_stream(conn, file_id, row.get("meta", {}))
+                )
 
         if not streams:
-            raise Failure(f"No files resolved for calibration partition: {partition_key}")
+            raise Failure(
+                f"No files resolved for calibration partition: {partition_key}"
+            )
 
         return streams[0] if len(streams) == 1 else streams

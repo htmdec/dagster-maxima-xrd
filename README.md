@@ -70,6 +70,7 @@ Copy `.env.example` to `.env` and provide values:
 - `GIRDER_API_URL`: Girder API base URL.
 - `GIRDER_API_KEY`: API key for read/write access.
 - `GIRDER_MODEL_ITEM_ID`: Girder item ID containing the calibration model `.pth` file.
+- `GIRDER_STORAGE_FOLDER_ID`: Girder folder ID for storing intra-asset serialized data.
 
 Also ensure these are set in your runtime environment (used by sensors/resources when querying partition APIs):
 
@@ -79,7 +80,6 @@ Also ensure these are set in your runtime environment (used by sensors/resources
 Optional local overrides:
 
 - `DAGSTER_HOME`: defaults to `./dagster_home` in local dev workflows.
-- `DAGSTER_STORAGE_DIR`: defaults to `/tmp/dagster_storage` if unset.
 
 ## Local Development
 
@@ -103,7 +103,6 @@ pip install dagster-webserver dagster-dg-cli pytest pytest-cov python-dotenv sph
 Copy-Item .env.example .env
 # Edit .env and set additional BASE_PARENT_* values in your shell or launcher
 $env:DAGSTER_HOME = (Resolve-Path .\dagster_home)
-$env:DAGSTER_STORAGE_DIR = (Resolve-Path .\dagster_storage)
 ```
 
 ### 4. Run Dagster
