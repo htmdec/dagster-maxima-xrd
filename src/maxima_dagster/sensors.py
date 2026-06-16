@@ -205,7 +205,7 @@ def build_girder_partition_sensor(
         for partition_key in eligible_partition_keys:
             merged_checksums[partition_key] = partition_updates[partition_key]
 
-        if not context.cursor or not eligible_partition_keys:
+        if not eligible_partition_keys:
             return SensorResult(
                 cursor=_serialize_girder_cursor(cursor_since, merged_checksums),
                 run_requests=[],
