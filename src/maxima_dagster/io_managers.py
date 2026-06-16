@@ -103,10 +103,8 @@ class GirderIOManager(ConfigurableIOManager):
 
         filename = self._get_path(context)
         buffer = io.BytesIO(json.dumps(serialized).encode("utf-8"))
-        filesize = buffer.seek(0, io.SEEK_END)
-        buffer.seek(0)
-        conn.client.uploadStreamToFolder(
-            self.storage_folder_id, buffer, filename, filesize, mimeType="application/json"
+        conn.upload_file_to_folder(
+            self.storage_folder_id, buffer, filename, mime_type="application/json"
         )
 
     def _upload_payload(self, conn: Any, payload: GirderPayload) -> GirderPointer:
