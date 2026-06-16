@@ -4,10 +4,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     DAGSTER_HOME=/opt/dagster/dagster_home \
-    DAGSTER_STORAGE_DIR=/opt/dagster/app/storage \
     PYTHONPATH=/opt/dagster/app/src
 
-RUN mkdir -p ${DAGSTER_HOME} ${DAGSTER_STORAGE_DIR}
+RUN mkdir -p ${DAGSTER_HOME}
 
 WORKDIR /opt/dagster/app
 
