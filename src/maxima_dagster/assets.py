@@ -232,7 +232,7 @@ def azimuthal_integration(
     ai_metadata_base = {
         "prov": build_prov_metadata(run_id),
         "poni": build_poni_linkage_metadata(
-            poni_item_id=poni.metadata.get("item_id", "unknown"),
+            poni_item_id=poni.item_id or "unknown",
             girder_url=girder_url,
             geometry=geometry,
         ),
