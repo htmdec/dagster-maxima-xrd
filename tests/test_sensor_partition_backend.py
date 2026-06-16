@@ -51,7 +51,7 @@ def _patch_fetch_partitions(monkeypatch):
     monkeypatch.setattr(sensor_module, "fetch_partitions", _fake_fetch_partitions)
 
 
-def test_xrd_sensor_bootstrap_sets_cursor_without_runs() -> None:
+def test_xrd_sensor_bootstrap_sets_cursor_triggers_runs() -> None:
     with DagsterInstance.ephemeral() as instance:
         _materialize_poni(instance, CALIBRANT_KEY_1)
         connection = _PartitionConnection(
@@ -64,8 +64,9 @@ def test_xrd_sensor_bootstrap_sets_cursor_without_runs() -> None:
         context = build_sensor_context(resources={"GirderConnection": connection}, instance=instance)
         evaluation = xrd_experiment_sensor(context)
 
-    assert evaluation.run_requests == []
-    assert evaluation.dynamic_partitions_requests == []
+    assert len(evaluation.run_requests) == 1
+    request = evaluation.run_requests[0]
+    assert request.partition_key == EXPERIMENT_KEY_1
     assert evaluation.cursor
     payload = json.loads(evaluation.cursor)
     assert set(payload.keys()) == {"since", "checksums_by_partition"}
@@ -197,14 +198,18 @@ def test_xrd_sensor_skips_when_poni_missing() -> None:
     assert payload["checksums_by_partition"] == {}
 
 
-def test_calibration_sensor_bootstrap_sets_cursor_without_runs() -> None:
-    connection = _PartitionConnection({"xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"}})
+def test_calibration_sensor_bootstrap_sets_cursor_with_runs() -> None:
+    with DagsterInstance.ephemeral() as instance:
+        connection = _PartitionConnection({"xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"}})
 
-    context = build_sensor_context(resources={"GirderConnection": connection})
-    evaluation = xrd_calibration_sensor(context)
+        context = build_sensor_context(
+            resources={"GirderConnection": connection}, instance=instance
+        )
+        evaluation = xrd_calibration_sensor(context)
 
-    assert evaluation.run_requests == []
-    assert evaluation.dynamic_partitions_requests == []
+    assert len(evaluation.run_requests) == 1
+    assert len(evaluation.dynamic_partitions_requests) == 1
+    assert evaluation.run_requests[0].partition_key == CALIBRANT_KEY_1
     payload = json.loads(evaluation.cursor)
     assert payload["checksums_by_partition"] == {CALIBRANT_KEY_1: "chk_a"}
 

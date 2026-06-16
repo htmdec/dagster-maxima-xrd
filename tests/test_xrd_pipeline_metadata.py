@@ -190,6 +190,7 @@ def test_azimuthal_integration_uploads_exact_metadata_shape(monkeypatch) -> None
         def __init__(self, data: bytes, metadata):
             super().__init__(data)
             self.metadata = metadata
+            self.item_id = metadata.pop("item_id")
 
     poni_payload = _PoniBuffer(b"poni", {"item_id": "poni_item_1"})
 
