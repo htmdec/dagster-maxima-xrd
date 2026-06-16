@@ -251,7 +251,7 @@ def azimuthal_integration(
 
         payloads[scan_id] = GirderPayload(
             stream=io.BytesIO(csv_bytes),
-            filename=f"scan_point_{int(scan_id)}_azimuthal.csv",
+            filename=f"scan_point_{int(scan_id)}_azimuthal_xrd.csv",
             folder_id=folder_id,
             mime_type="text/csv",
             metadata=item_meta,
