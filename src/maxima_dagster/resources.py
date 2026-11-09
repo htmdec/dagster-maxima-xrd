@@ -26,10 +26,10 @@ class GirderClientWithSession(gc):
             try:
                 self.authenticate(apiKey=apiKey)
             except requests.RequestException as exc:
-                # girder_client sends the key as a query parameter, so both HttpError
-                # and urllib3 connection errors embed it in their message. Re-raise a
-                # scrubbed error and drop the original chain ("from None") so the key
-                # doesn't end up in Dagster's event log.
+                # Defense in depth: if the key ever ends up in a URL again, HttpError
+                # and urllib3 connection errors would embed it in their message.
+                # Re-raise a scrubbed error and drop the original chain ("from None")
+                # so the key doesn't end up in Dagster's event log.
                 message = str(exc)
                 for secret in {apiKey, quote(apiKey, safe="")}:
                     message = message.replace(secret, "***")
@@ -37,6 +37,15 @@ class GirderClientWithSession(gc):
                     f"Girder API key authentication failed ({type(exc).__name__}): {message}"
                 ) from None
         self._session = session
+
+    def authenticate(self, username=None, password=None, interactive=False, apiKey=None):
+        if not apiKey:
+            return super().authenticate(username, password, interactive=interactive)
+        # Upstream sends the key as a query parameter (api_key/token?key=...), which
+        # leaks it into exception messages and access logs. Send it form-encoded in
+        # the request body instead.
+        resp = self.post("api_key/token", data={"key": apiKey})
+        self.setToken(resp["authToken"]["token"])
 
 
 _girder_client_cache: dict[tuple, GirderClientWithSession] = {}
