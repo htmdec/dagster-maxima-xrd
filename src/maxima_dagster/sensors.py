@@ -72,26 +72,33 @@ def _parse_checksum_map(value: Any) -> dict[str, str]:
     return checksums
 
 
-def _parse_girder_cursor(cursor: str | None) -> tuple[str, dict[str, str]]:
+def _parse_girder_cursor(cursor: str | None) -> tuple[str, dict[str, str], dict[str, str]]:
     payload = _parse_cursor_payload(cursor)
     since = str(payload.get("since") or "")
     checksums_by_partition = _parse_checksum_map(payload.get("checksums_by_partition"))
-    return since, checksums_by_partition
+    pending_by_partition = _parse_checksum_map(payload.get("pending_by_partition"))
+    return since, checksums_by_partition, pending_by_partition
 
 
-def _serialize_girder_cursor(since: str, checksums_by_partition: dict[str, str]) -> str:
+def _serialize_girder_cursor(
+    since: str,
+    checksums_by_partition: dict[str, str],
+    pending_by_partition: dict[str, str] | None = None,
+) -> str:
     return json.dumps(
         {
             "since": since,
             "checksums_by_partition": dict(sorted(checksums_by_partition.items())),
+            "pending_by_partition": dict(sorted((pending_by_partition or {}).items())),
         }
     )
 
 
-PartitionGate = Callable[[SensorEvaluationContext, Any, str, str], bool]
+# Given the changed partitions (key -> checksum), return the keys that are ready to run.
+PartitionGate = Callable[[SensorEvaluationContext, Any, dict[str, str]], list[str]]
 
 
-def _resolve_closest_calibrant_partition_key(gc: Any, experiment_partition_key: str) -> str | None:
+def _fetch_calibrant_partition_keys(gc: Any) -> list[str]:
     calibrant_partitions = fetch_partitions(
         gc,
         data_type="xrd_calibrant_raw",
@@ -99,50 +106,46 @@ def _resolve_closest_calibrant_partition_key(gc: Any, experiment_partition_key: 
         base_id = os.environ.get("BASE_PARENT_ID"),
         base_type = os.environ.get("BASE_PARENT_TYPE"),
     )
-    calibrant_keys = list(calibrant_partitions.keys())
-    if not calibrant_keys:
-        return None
-
-    experiment_date = parse_partition_datetime(experiment_partition_key)
-    return select_closest_preceding_partition(calibrant_keys, experiment_date)
+    return list(calibrant_partitions.keys())
 
 
-def _poni_partition_materialized(
-    context: SensorEvaluationContext,
-    calibrant_partition_key: str,
-) -> bool:
-    materialized = context.instance.get_materialized_partitions(AssetKey("poni"))
-    return calibrant_partition_key in materialized
-
-
-def _poni_ready_for_experiment(
+def _poni_ready_for_experiments(
     context: SensorEvaluationContext,
     gc: Any,
-    partition_key: str,
-    checksum: str,
-) -> bool:
-    _ = checksum
-    try:
-        target_calibrant_key = _resolve_closest_calibrant_partition_key(gc, partition_key)
-    except ValueError as exc:
-        context.log.warning(str(exc))
-        return False
+    changed_partitions: dict[str, str],
+) -> list[str]:
+    if not changed_partitions:
+        return []
 
-    if target_calibrant_key is None:
-        context.log.info(
-            "No calibrant partition exists before the experiment. "
-            f"Skipping partition {partition_key}."
-        )
-        return False
+    calibrant_keys = _fetch_calibrant_partition_keys(gc)
+    materialized = context.instance.get_materialized_partitions(AssetKey("poni"))
 
-    if not _poni_partition_materialized(context, target_calibrant_key):
-        context.log.info(
-            "Required PONI partition is not materialized yet. "
-            f"Skipping partition {partition_key} (calibrant {target_calibrant_key})."
-        )
-        return False
+    ready: list[str] = []
+    for partition_key in changed_partitions:
+        try:
+            experiment_date = parse_partition_datetime(partition_key)
+            target_calibrant_key = select_closest_preceding_partition(calibrant_keys, experiment_date)
+        except ValueError as exc:
+            context.log.warning(str(exc))
+            continue
 
-    return True
+        if target_calibrant_key is None:
+            context.log.info(
+                "No calibrant partition exists before the experiment. "
+                f"Skipping partition {partition_key}."
+            )
+            continue
+
+        if target_calibrant_key not in materialized:
+            context.log.info(
+                "Required PONI partition is not materialized yet. "
+                f"Skipping partition {partition_key} (calibrant {target_calibrant_key})."
+            )
+            continue
+
+        ready.append(partition_key)
+
+    return ready
 
 
 def build_girder_partition_sensor(
@@ -167,8 +170,9 @@ def build_girder_partition_sensor(
     ) -> SensorResult:
         gc = GirderConnection or context.resources.GirderConnection
 
-        since, checksums_by_partition = _parse_girder_cursor(context.cursor)
+        since, checksums_by_partition, pending_by_partition = _parse_girder_cursor(context.cursor)
         poll_since = since or _default_since()
+        cursor_since = _next_since()
 
         partition_updates = fetch_partitions(
             gc, 
@@ -178,28 +182,27 @@ def build_girder_partition_sensor(
             base_type = os.environ.get("BASE_PARENT_TYPE"),
             )
 
-        changed_partition_keys = [
-            partition_key
+        # Partitions blocked by the gate on earlier ticks are carried in the cursor
+        # and re-checked here, so ``since`` can always advance.
+        partition_updates = {**pending_by_partition, **partition_updates}
+
+        changed_partitions = {
+            partition_key: checksum
             for partition_key, checksum in partition_updates.items()
             if checksums_by_partition.get(partition_key) != checksum
-        ]
+        }
 
-        eligible_partition_keys: list[str] = []
-        for partition_key in changed_partition_keys:
-            checksum = partition_updates[partition_key]
-            if partition_gate and not partition_gate(context, gc, partition_key, checksum):
-                continue
-            eligible_partition_keys.append(partition_key)
+        if partition_gate:
+            eligible = set(partition_gate(context, gc, changed_partitions))
+        else:
+            eligible = set(changed_partitions)
+        eligible_partition_keys = [key for key in changed_partitions if key in eligible]
 
-        blocked_partition_keys = [
-            partition_key
-            for partition_key in changed_partition_keys
-            if partition_key not in eligible_partition_keys
-        ]
-
-        cursor_since = _next_since()
-        if blocked_partition_keys:
-            cursor_since = since or _default_since()
+        pending_partitions = {
+            partition_key: checksum
+            for partition_key, checksum in changed_partitions.items()
+            if partition_key not in eligible
+        }
 
         merged_checksums = dict(checksums_by_partition)
         for partition_key in eligible_partition_keys:
@@ -207,7 +210,7 @@ def build_girder_partition_sensor(
 
         if not eligible_partition_keys:
             return SensorResult(
-                cursor=_serialize_girder_cursor(cursor_since, merged_checksums),
+                cursor=_serialize_girder_cursor(cursor_since, merged_checksums, pending_partitions),
                 run_requests=[],
                 dynamic_partitions_requests=[],
             )
@@ -238,7 +241,7 @@ def build_girder_partition_sensor(
             dynamic_requests = [partitions_def.build_add_request(new_partitions)]
 
         return SensorResult(
-            cursor=_serialize_girder_cursor(cursor_since, merged_checksums),
+            cursor=_serialize_girder_cursor(cursor_since, merged_checksums, pending_partitions),
             run_requests=run_requests,
             dynamic_partitions_requests=dynamic_requests,
         )
@@ -255,7 +258,7 @@ xrd_experiment_sensor = build_girder_partition_sensor(
     job_name="xrd",
     data_type="xrd_raw",
     partitions_def=experiment_partitions,
-    partition_gate=_poni_ready_for_experiment,
+    partition_gate=_poni_ready_for_experiments,
 )
 
 xrd_calibration_sensor = build_girder_partition_sensor(

@@ -69,7 +69,7 @@ def test_xrd_sensor_bootstrap_sets_cursor_triggers_runs() -> None:
     assert request.partition_key == EXPERIMENT_KEY_1
     assert evaluation.cursor
     payload = json.loads(evaluation.cursor)
-    assert set(payload.keys()) == {"since", "checksums_by_partition"}
+    assert set(payload.keys()) == {"since", "checksums_by_partition", "pending_by_partition"}
     assert payload["checksums_by_partition"] == {EXPERIMENT_KEY_1: "chk_1"}
 
 
@@ -196,6 +196,89 @@ def test_xrd_sensor_skips_when_poni_missing() -> None:
     assert evaluation.run_requests == []
     payload = json.loads(evaluation.cursor)
     assert payload["checksums_by_partition"] == {}
+    assert payload["pending_by_partition"] == {EXPERIMENT_KEY_1: "chk_1"}
+    assert payload["since"] != sensor_module._default_since()
+
+
+def test_xrd_sensor_pending_partition_runs_once_poni_materialized() -> None:
+    with DagsterInstance.ephemeral() as instance:
+        seed_connection = _PartitionConnection(
+            {
+                "xrd_raw": {EXPERIMENT_KEY_1: "chk_1"},
+                "xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"},
+            }
+        )
+        seed_context = build_sensor_context(resources={"GirderConnection": seed_connection}, instance=instance)
+        seed = xrd_experiment_sensor(seed_context)
+        assert seed.run_requests == []
+
+        _materialize_poni(instance, CALIBRANT_KEY_1)
+        # The advanced ``since`` means Girder no longer reports the partition.
+        next_connection = _PartitionConnection(
+            {
+                "xrd_raw": {},
+                "xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"},
+            }
+        )
+        next_context = build_sensor_context(
+            resources={"GirderConnection": next_connection},
+            cursor=seed.cursor,
+            instance=instance,
+        )
+        evaluation = xrd_experiment_sensor(next_context)
+
+    assert len(evaluation.run_requests) == 1
+    assert evaluation.run_requests[0].run_key == f"xrd_raw:{EXPERIMENT_KEY_1}:chk_1"
+    payload = json.loads(evaluation.cursor)
+    assert payload["checksums_by_partition"] == {EXPERIMENT_KEY_1: "chk_1"}
+    assert payload["pending_by_partition"] == {}
+
+
+def test_xrd_sensor_blocked_partition_does_not_hold_back_since() -> None:
+    with DagsterInstance.ephemeral() as instance:
+        _materialize_poni(instance, CALIBRANT_KEY_1)
+        # EXPERIMENT_KEY_0 predates every calibrant, so it can never pass the gate.
+        experiment_key_0 = "IGSN-0//2025-12-31T00:00:00+00:00"
+        connection = _PartitionConnection(
+            {
+                "xrd_raw": {experiment_key_0: "chk_0", EXPERIMENT_KEY_1: "chk_1"},
+                "xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"},
+            }
+        )
+        context = build_sensor_context(
+            resources={"GirderConnection": connection},
+            cursor=sensor_module._serialize_girder_cursor(sensor_module._default_since(), {}),
+            instance=instance,
+        )
+        evaluation = xrd_experiment_sensor(context)
+
+    assert [r.partition_key for r in evaluation.run_requests] == [EXPERIMENT_KEY_1]
+    payload = json.loads(evaluation.cursor)
+    assert payload["since"] != sensor_module._default_since()
+    assert payload["pending_by_partition"] == {experiment_key_0: "chk_0"}
+
+
+def test_xrd_sensor_fetches_calibrants_once_per_tick(monkeypatch) -> None:
+    calls: list[str] = []
+    fake_fetch = sensor_module.fetch_partitions
+
+    def _counting_fetch(gc: Any, data_type: str, since: str, base_id: str | None = None, base_type: str | None = None) -> dict[str, str]:
+        calls.append(data_type)
+        return fake_fetch(gc, data_type=data_type, since=since, base_id=base_id, base_type=base_type)
+
+    monkeypatch.setattr(sensor_module, "fetch_partitions", _counting_fetch)
+
+    with DagsterInstance.ephemeral() as instance:
+        connection = _PartitionConnection(
+            {
+                "xrd_raw": {EXPERIMENT_KEY_1: "chk_1", EXPERIMENT_KEY_2: "chk_2"},
+                "xrd_calibrant_raw": {CALIBRANT_KEY_1: "chk_a"},
+            }
+        )
+        context = build_sensor_context(resources={"GirderConnection": connection}, instance=instance)
+        xrd_experiment_sensor(context)
+
+    assert calls == ["xrd_raw", "xrd_calibrant_raw"]
 
 
 def test_calibration_sensor_bootstrap_sets_cursor_with_runs() -> None:
