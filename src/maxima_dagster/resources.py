@@ -4,6 +4,7 @@ import threading
 from contextlib import contextmanager
 from importlib.metadata import version, PackageNotFoundError
 from typing import Any, Generator
+from urllib.parse import quote
 
 from girder_client import GirderClient as gc
 import requests
@@ -13,12 +14,28 @@ from dagster import ConfigurableResource
 from pydantic import PrivateAttr
 
 
+class GirderAuthenticationError(RuntimeError):
+    """Raised when API key authentication fails; never contains the key itself."""
+
+
 class GirderClientWithSession(gc):
     """Extends standard GirderClient to accept a persistent requests.Session."""
     def __init__(self, apiUrl=None, apiKey=None, session=None, **kwargs):
         super().__init__(apiUrl=apiUrl, **kwargs)
         if apiKey:
-            self.authenticate(apiKey=apiKey)
+            try:
+                self.authenticate(apiKey=apiKey)
+            except requests.RequestException as exc:
+                # girder_client sends the key as a query parameter, so both HttpError
+                # and urllib3 connection errors embed it in their message. Re-raise a
+                # scrubbed error and drop the original chain ("from None") so the key
+                # doesn't end up in Dagster's event log.
+                message = str(exc)
+                for secret in {apiKey, quote(apiKey, safe="")}:
+                    message = message.replace(secret, "***")
+                raise GirderAuthenticationError(
+                    f"Girder API key authentication failed ({type(exc).__name__}): {message}"
+                ) from None
         self._session = session
 
 

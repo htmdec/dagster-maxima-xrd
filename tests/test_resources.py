@@ -1,3 +1,9 @@
+import traceback
+
+import girder_client
+import pytest
+import requests
+
 from maxima_dagster import resources
 
 
@@ -21,3 +27,37 @@ def test_girder_connection_builds_client_with_api_credentials(monkeypatch) -> No
     assert client.apiUrl == "https://girder.example/api/v1"
     assert client.apiKey == "secret"
     assert "User-Agent" in client.session.headers
+
+
+_KEY = "s3cr3tK3y+/="
+_URL = "https://girder.example/api/v1"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        girder_client.HttpError(
+            502, "Bad Gateway", f"{_URL}/api_key/token?key={_KEY}", "POST"
+        ),
+        requests.exceptions.ConnectTimeout(
+            "HTTPSConnectionPool(host='girder.example', port=443): Max retries "
+            "exceeded with url: /api/v1/api_key/token?key=s3cr3tK3y%2B%2F%3D"
+        ),
+    ],
+)
+def test_authentication_errors_do_not_leak_api_key(monkeypatch, error) -> None:
+    def _fail(self, *args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(girder_client.GirderClient, "authenticate", _fail)
+
+    with pytest.raises(resources.GirderAuthenticationError) as excinfo:
+        resources.GirderClientWithSession(apiUrl=_URL, apiKey=_KEY)
+
+    # Render the way Dagster does (traceback incl. chained exceptions).
+    rendered = "".join(
+        traceback.format_exception(excinfo.type, excinfo.value, excinfo.tb)
+    )
+    assert type(error).__name__ in rendered
+    assert _KEY not in rendered
+    assert "s3cr3tK3y%2B%2F%3D" not in rendered
