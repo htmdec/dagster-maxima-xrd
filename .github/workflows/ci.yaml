@@ -26,6 +26,7 @@ jobs:
 
       - name: Install package + test dependencies
         run: |
+          python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu torch==2.10.0 torchvision==0.25.0
           python -m pip install -e .
           python -m pip install pytest
 
@@ -52,6 +53,7 @@ jobs:
 
       - name: Install package + docs dependencies
         run: |
+          python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu torch==2.10.0 torchvision==0.25.0
           python -m pip install -e .
           python -m pip install sphinx sphinx-rtd-theme
 
