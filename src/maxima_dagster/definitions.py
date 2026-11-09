@@ -1,5 +1,5 @@
 import os
-from dagster import Definitions, define_asset_job
+from dagster import Definitions, EnvVar, define_asset_job
 
 from .assets import xrd_raw, calibration_model, poni, azimuthal_integration
 from .sensors import xrd_experiment_sensor, xrd_calibration_sensor
@@ -19,7 +19,8 @@ calibration_precompute = define_asset_job(
 
 girder_conn = GirderConnection(
     api_url=os.environ.get("GIRDER_API_URL", ""),
-    api_key=os.environ.get("GIRDER_API_KEY", ""),
+    # EnvVar is resolved at execution time, so the key is never shipped to the UI.
+    api_key=EnvVar("GIRDER_API_KEY"),
 )
 
 defs = Definitions(
