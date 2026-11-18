@@ -236,6 +236,7 @@ def test_azimuthal_integration_uploads_exact_metadata_shape(monkeypatch) -> None
 def test_poni_uploads_exact_metadata_shape(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GIRDER_API_URL", "https://girder.example/api/v1")
+    monkeypatch.setattr(assets.calibration_recipe, "CALIBRANT_IGSN", "PHYSICAL-CALIBRANT-IGSN")
 
     h5_path = tmp_path / "calibrant.h5"
     _write_test_h5(h5_path)
@@ -246,7 +247,7 @@ def test_poni_uploads_exact_metadata_shape(tmp_path, monkeypatch) -> None:
             "_id": "cal_item_1",
             "name": "xrd_calibrant_data_000001.h5",
             "folderId": "cal_folder",
-            "meta": {"igsn": "CAL-IGSN-1"},
+            "meta": {"igsn": "RUN-SAMPLE-IGSN"},
         }
     ]
     gc = _PoniClient(detail_rows=rows)
@@ -309,7 +310,7 @@ def test_poni_uploads_exact_metadata_shape(tmp_path, monkeypatch) -> None:
     assert metadata["calibrant"] == {
         "item_id": "cal_item_1",
         "link": "https://girder.example/#item/cal_item_1",
-        "igsn": "CAL-IGSN-1",
+        "igsn": "PHYSICAL-CALIBRANT-IGSN",
     }
     assert metadata["data_type"] == "xrd_calibrant_derived"
     assert metadata["experiment_date"] == "2026-01-01T00:00:00+00:00"

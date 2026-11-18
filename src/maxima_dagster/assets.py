@@ -14,7 +14,7 @@ from dagster import (
     asset,
 )
 
-from .modules import azimuthal_integrator, calibrate
+from .modules import azimuthal_integrator, calibrate, calibration_recipe
 from .partition_mapping import ClosestPrecedingPartitionMapping
 from .sensors import calibrant_partitions, experiment_partitions
 from .contracts import (
@@ -146,7 +146,7 @@ def poni(
         "calibrant": build_calibrant_metadata(
             calibrant_item_id=item_id,
             girder_url=girder_url,
-            igsn=conn.get_igsn(target_row),
+            igsn=calibration_recipe.CALIBRANT_IGSN,
         ),
         "data_type": "xrd_calibrant_derived",
         "experiment_date": exp_date,
