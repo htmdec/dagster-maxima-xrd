@@ -352,7 +352,7 @@ class HybridRefiner:
         support = []
         for _ in range(2):
             centroids, targets, strips = self._strip_centroids(signal, mask, parameters, points)
-            parameters = self._fit(parameters, centroids, targets, _TRANSLATIONS)
+            parameters = self._fit(parameters, centroids, targets, _FIT_PARAMETERS)
             support.append(strips)
         return parameters, support
 
