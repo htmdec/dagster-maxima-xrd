@@ -103,6 +103,44 @@ def _extract_peaks(signal: np.ndarray, mask: np.ndarray) -> np.ndarray:
     )
 
 
+def _fit_doublet_profiles(
+    profiles: np.ndarray, offsets: np.ndarray, separations: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Locate the primary line in each radial profile with a fixed-separation doublet model.
+
+    The secondary line sits inside the strip window, so an intensity centroid is pulled
+    toward it. Each profile is modelled as two Gaussians sharing a width, with the
+    secondary offset by the known doublet separation and its amplitude left free.
+    """
+    half_width = offsets[-1]
+    min_sigma = 2 * (offsets[1] - offsets[0])
+    centers = np.full(len(profiles), np.nan)
+    sigmas = np.full(len(profiles), np.nan)
+    for index, (profile, separation) in enumerate(zip(profiles, separations)):
+        peak = float(profile.max())
+        if not np.isfinite(peak) or peak <= 0:
+            continue
+
+        def model(values: np.ndarray) -> np.ndarray:
+            center, sigma, primary, secondary = values
+            return primary * np.exp(-0.5 * ((offsets - center) / sigma) ** 2) + secondary * np.exp(
+                -0.5 * ((offsets - center - separation) / sigma) ** 2
+            )
+
+        start = np.array([offsets[profile.argmax()], 2 * min_sigma, peak, 0.5 * peak])
+        lower = np.array([-half_width, min_sigma, 0.0, 0.0])
+        upper = np.array([half_width, half_width, 10 * peak, 10 * peak])
+        fit = least_squares(
+            lambda values: model(values) - profile,
+            np.clip(start, lower, upper),
+            bounds=(lower, upper),
+            x_scale=np.array([min_sigma, min_sigma, peak, peak]),
+        )
+        if fit.success:
+            centers[index], sigmas[index] = fit.x[:2]
+    return centers, sigmas
+
+
 class HybridRefiner:
     """Refine a neural geometry seed using a frame and its effective mask."""
 
@@ -286,12 +324,12 @@ class HybridRefiner:
         intensity = np.maximum(sampled - baseline, 0)
         total = intensity.sum(axis=1)
         noise = np.std(np.c_[sampled[:, :edge], sampled[:, -edge:]], axis=1)
-        center = (intensity @ offsets) / np.maximum(total, 1e-30)
-        sigma = np.sqrt(
-            np.sum(intensity * (offsets[None, :] - center[:, None]) ** 2, axis=1)
-            / np.maximum(total, 1e-30)
-        )
         half_width = offsets[-1]
+        center, sigma = _fit_doublet_profiles(
+            sampled - baseline,
+            offsets,
+            self._secondary_angles[family] - self._primary_angles[family],
+        )
         keep = (
             (~invalid.any(axis=(1, 2)))
             & (intensity.max(axis=1) > 5 * np.maximum(noise, 1e-5))
