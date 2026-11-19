@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 from pyFAI.geometry import Geometry
 from pyFAI.integrator.azimuthal import AzimuthalIntegrator as PyFAIAzimuthalIntegrator
 
+from .masking import effective_mask
+
 
 Q_COLUMN = "q_nm^-1"
 INTENSITY_COLUMN = "intensity"
@@ -57,6 +59,8 @@ def _integrate_with_ai(
         kwargs["radial_range"] = radial_range
 
     pattern = _coerce_pattern(image)
+    # pyFAI replaces its detector mask with an explicit one, so fold the detector mask in
+    kwargs["mask"] = effective_mask(np.asarray(image), getattr(ai, "mask", None))
     try:
         q_vals, intensity = ai.integrate1d(pattern, **kwargs)
     except TypeError:
