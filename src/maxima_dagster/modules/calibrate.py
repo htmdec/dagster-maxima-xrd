@@ -1,320 +1,262 @@
-"""
-This module provides a class `MaximaCalibrator` for calibrating 2D X-ray diffraction patterns. 
-It utilizes a hierarchical Swin Transformer (`MaximaSwin`) to regress an initial geometric guess 
-(distance, center, rotation) and subsequently refines this guess using `pyFAI` and a seeded 
-geometric optimization strategy (`PeakOptimizer`).
+"""Masked Swin initialization and hybrid refinement for Maxima XRD."""
 
-Classes:
-    MaximaSwin: The neural network architecture.
-    PeakOptimizer: The refinement engine using peak detection.
-    MaximaCalibrator: The main interface for loading models and running calibration.
-"""
+from __future__ import annotations
+
+import hashlib
+import math
+from os import PathLike
+from pathlib import Path
+from typing import BinaryIO
 
 import numpy as np
-import io
 import torch
 import torch.nn as nn
-from torchvision import transforms
+import torch.nn.functional as F
+from pyFAI.detectors import Eiger2CdTe_1M, detector_factory
 from pyFAI.geometry import Geometry
-from pyFAI.calibrant import CALIBRANT_FACTORY
-from pyFAI.detectors import detector_factory
-from pyFAI.geometryRefinement import GeometryRefinement
-from skimage.feature import peak_local_max
-from scipy.optimize import minimize
-from transformers import SwinModel, SwinConfig
+from pyFAI.io.ponifile import PoniFile
+from transformers import SwinConfig, SwinModel
 
-class MaximaSwin(nn.Module):
-    """
-    Main architecture object combining a Swin Transformer backbone with a regression head.
+from . import calibration_recipe as recipe
+from .refinement import HybridRefiner, RefinementPriors
 
-    Args:
-        backbone (SwinModel): Pretrained Swin Transformer backbone.
-        head (nn.Module): Fully connected head for geometry regression.
-    """
-    def __init__(self, backbone, head):
-        super().__init__()
-        self.swin = backbone
-        self.head = head
-        self.pooler = nn.AdaptiveAvgPool1d(1)
-
-    def forward(self, pixel_values):
-        """
-        Forward pass to predict geometry parameters.
-
-        Args:
-            pixel_values (torch.Tensor): Input image tensor of shape (B, C, H, W).
-
-        Returns:
-            torch.Tensor: Predicted geometry parameters of shape (B, num_outputs).
-        """
-
-        outputs = self.swin(pixel_values=pixel_values)
-        last_hidden_state = outputs.last_hidden_state             # shape: (B, N, C)
-        feature_transpose = last_hidden_state.transpose(1, 2)     # shape: (B, C, N)
-        feature_pool = self.pooler(feature_transpose).flatten(1)  # shape: (B, C)
-        geometry_params = self.head(feature_pool)                 # shape: (B, num_outputs)
-
-        return geometry_params
-
-class PeakOptimizer:
-    """
-        Optimizes peak detection parameters and refines geometry using the Nelder-Mead method.
-
-        Args:
-            image (np.ndarray): 2D diffraction image for peak detection.
-            initial_geometry (Geometry): Initial geometry estimate from the model.
-            calibrant (Calibrant): pyFAI Calibrant object.
-            exclude_border (int, optional): Border width to exclude from peak detection. Defaults to 300.
-    """
-    def __init__(self, image, initial_geometry, calibrant, exclude_border=300):
-        self.image = image
-        self.geo = initial_geometry
-        self.calibrant = calibrant
-        self.exclude_border = exclude_border
-        
-        self.best_error = float('inf')
-        self.best_geometry = None
-
-    def _objective(self, params):    
-        min_dist = int(max(1, round(params[0])))
-        thresh = np.clip(params[1], 0.001, 1.0)
-        tol_deg = max(0.1, params[2])
-
-        try:
-            peaks = peak_local_max(
-                self.image, 
-                min_distance=min_dist, 
-                threshold_rel=thresh,
-                exclude_border=self.exclude_border
-            )
-        except Exception:
-            return 1e6 
-
-        if len(peaks) < 5: return 1e5
-
-        tth_measured = self.geo.tth(peaks[:, 0], peaks[:, 1])
-        tth_expected = np.array(self.calibrant.get_2th())
-        diff_matrix = np.abs(tth_measured[:, None] - tth_expected[None, :])
-        
-        mask = diff_matrix.min(axis=1) < np.deg2rad(tol_deg)
-        if np.sum(mask) < 6: return 1e4
-
-        data = np.column_stack((peaks[mask, 0], peaks[mask, 1], diff_matrix.argmin(axis=1)[mask]))
-
-        try:
-            refiner = GeometryRefinement(
-                data=data,  
-                dist=self.geo.dist, poni1=self.geo.poni1, poni2=self.geo.poni2,
-                rot1=self.geo.rot1, rot2=self.geo.rot2, rot3=self.geo.rot3,
-                pixel1=self.geo.detector.pixel1, pixel2=self.geo.detector.pixel2,
-                detector=self.geo.detector, wavelength=self.calibrant.wavelength,
-                calibrant=self.calibrant
-            )
-            error = refiner.refine2()
-            
-            if error < self.best_error:
-                self.best_error = error
-                self.best_geometry = refiner.get_geometry()
-            return error
-        except Exception:
-            return 1e6
-
-    def optimize(self, initial_guess=[5, 0.1, 1.0]):
-        """
-        Runs the Nelder-Mead optimization to find the best refinement parameters.
-
-        Args:
-            initial_guess (list): [min_distance (px), threshold_rel, tolerance (deg)].
-
-        Returns:
-            Geometry: The best refined geometry object found.
-        """
-        _ = minimize(self._objective, x0=initial_guess, method='Nelder-Mead', tol=1e-4, options={'maxiter': 50})
-        return self.best_geometry
 
 HC_KEV_M = 1.2398419843320026e-9
-DEFAULT_WAVELENGTH_M = 0.5121261413149675e-10
+DEFAULT_WAVELENGTH_M = recipe.PRIMARY_WAVELENGTH_M
+GEOMETRY_PARAMETERS = ("dist", "poni1", "poni2", "rot1", "rot2", "rot3")
+_UINT32_SENTINEL = np.iinfo(np.uint32).max
+
 
 def resolve_wavelength(*, energy: float | None, wavelength: float | None) -> float:
     if wavelength is not None and energy is not None:
         raise ValueError("Provide either `energy` or `wavelength`, not both.")
     if wavelength is not None:
+        if not math.isfinite(wavelength) or wavelength <= 0:
+            raise ValueError("`wavelength` must be > 0 and finite.")
         return wavelength
     if energy is not None:
-        if energy <= 0.0:
-            raise ValueError("`energy` must be > 0.")
+        if not math.isfinite(energy) or energy <= 0:
+            raise ValueError("`energy` must be > 0 and finite.")
         return HC_KEV_M / energy
     return DEFAULT_WAVELENGTH_M
 
+
+class MaximaSwin(nn.Module):
+    """Mean-pool Swin tokens before the checkpoint's regression head."""
+
+    def __init__(self, backbone: SwinModel, head: nn.Module):
+        super().__init__()
+        self.swin = backbone
+        self.head = head
+        self.pooler = nn.AdaptiveAvgPool1d(1)
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        tokens = self.swin(pixel_values=pixel_values).last_hidden_state
+        return self.head(self.pooler(tokens.transpose(1, 2)).flatten(1))
+
+
+def _load_checkpoint(stream: BinaryIO) -> dict[str, torch.Tensor]:
+    stream.seek(0)
+    digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if digest != recipe.CHECKPOINT_SHA256:
+        raise ValueError(
+            f"Checkpoint SHA-256 mismatch for {recipe.CHECKPOINT_FILENAME}: "
+            f"expected {recipe.CHECKPOINT_SHA256}, got {digest}."
+        )
+    stream.seek(0)
+    return torch.load(stream, map_location="cpu", weights_only=True)
+
+
+def _effective_mask(image: np.ndarray, factory_mask: np.ndarray | None) -> np.ndarray:
+    """Combine the image's invalid counts with a detector mask supplied by the caller."""
+    if image.ndim != 2 or image.size == 0 or image.dtype.kind not in "iuf":
+        raise ValueError("Expected a nonempty 2D detector frame with numeric counts")
+    invalid = ~np.isfinite(image) | (image < 0)
+    bounds = np.finfo(image.dtype) if image.dtype.kind == "f" else np.iinfo(image.dtype)
+    if bounds.max >= _UINT32_SENTINEL:
+        invalid |= image >= image.dtype.type(_UINT32_SENTINEL)
+    if factory_mask is not None:
+        factory_mask = np.asarray(factory_mask, dtype=bool)
+        if factory_mask.shape != image.shape:
+            raise ValueError(f"Detector frame shape {image.shape} does not match factory mask shape {factory_mask.shape}")
+        invalid |= factory_mask
+    return invalid
+
+
+def _preprocess(image: np.ndarray, mask: np.ndarray, image_size: int) -> torch.Tensor:
+    """Apply training-time XRD preprocessing using the shared exclusion mask."""
+    image = np.log1p(np.where(mask, 0, image).astype(np.float32, copy=False))
+    valid_pixels = image[~mask]
+    if valid_pixels.size:
+        low, high = np.percentile(valid_pixels, (0.1, 99.9))
+        if high > low:
+            image = np.clip((image - low) / (high - low), 0, 1)
+        else:
+            image.fill(0)
+    image[mask] = 0
+
+    height, width = image.shape
+    side = max(height, width)
+    tensor = torch.from_numpy(image.astype(np.float32, copy=False))
+    tensor = tensor.unsqueeze(0).unsqueeze(0).repeat(1, 3, 1, 1)
+    tensor = F.pad(tensor, (0, side - width, 0, side - height))
+    tensor = F.interpolate(
+        tensor, (image_size, image_size), mode="bilinear", align_corners=False, antialias=True
+    )
+    mean = tensor.new_tensor((0.485, 0.456, 0.406)).view(1, 3, 1, 1)
+    std = tensor.new_tensor((0.229, 0.224, 0.225)).view(1, 3, 1, 1)
+    return (tensor - mean) / std
+
+
 class MaximaCalibrator:
-    """
-    Calibrator class using MaxSWIN model and pyFAI for diffraction geometry calibration.
+    """Load the frozen MAXIMA checkpoint and refine geometry in detector coordinates."""
 
-    Args:
-        model_path (str): Path to the trained model checkpoint (.pth).
-        calibrant (str, optional): Alias of the calibrant. Defaults to 'alpha_Al2O3'.
-        detector (str, optional): Alias of the detector. Defaults to 'Eiger2Cdte_1M'.
-        energy (float, optional): X-ray energy in keV. Defaults to None.
-        wavelength (float, optional): X-ray wavelength in meters. Defaults to None.
-        image_size (int, optional): Input image size for the model. Defaults to 1056.
-        backbone (str, optional): Pretrained Swin model name. Defaults to Swin Base Patch 4.
-        hidden_dim (int, optional): Hidden dimension size for the regression head. Defaults to 1024.
-        device (str, optional): Computation device ('cpu' or 'cuda'). Defaults to auto-detect.
-    """
-    def __init__(self, 
-                 model_src: str | io.BytesIO, 
-                 calibrant: str = 'alpha_Al2O3', 
-                 detector: str = 'Eiger2Cdte_1M', 
-                 energy: float = None,
-                 wavelength: float = None,
-                 image_size: int = 1056,
-                 backbone: str = 'microsoft/swin-base-patch4-window12-384-in22k',
-                 hidden_dim: int = 1024,
-                 device: str = None):
-        
-        self.model_src = model_src
-        self.calibrant_alias = calibrant
-        self.detector_alias = detector
+    def __init__(
+        self,
+        model_src: str | PathLike[str] | BinaryIO,
+        calibrant: str = recipe.CALIBRANT_NAME,
+        detector: str = recipe.DETECTOR_NAME,
+        energy: float | None = None,
+        wavelength: float | None = None,
+        image_size: int = recipe.IMAGE_SIZE,
+        backbone: str = recipe.BACKBONE_NAME,
+        hidden_dim: int = recipe.BACKBONE_FEATURES,
+        device: str | None = None,
+    ):
         self.wavelength = resolve_wavelength(energy=energy, wavelength=wavelength)
+        self.detector = detector_factory(detector)
+        if calibrant.casefold() != recipe.CALIBRANT_NAME.casefold() or not isinstance(
+            self.detector, Eiger2CdTe_1M
+        ):
+            raise ValueError(
+                f"Checkpoint {recipe.CHECKPOINT_VERSION} requires "
+                f"{recipe.CALIBRANT_NAME} and {recipe.DETECTOR_NAME}."
+            )
+        if (image_size, backbone, hidden_dim) != (
+            recipe.IMAGE_SIZE, recipe.BACKBONE_NAME, recipe.BACKBONE_FEATURES
+        ):
+            raise ValueError(f"Architecture must match checkpoint {recipe.CHECKPOINT_VERSION}.")
         self.image_size = image_size
-        self.backbone = backbone
-        self.hidden_dim = hidden_dim
-        
-        self.device = torch.device(device) if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Initializing MaximaCalibrator on {self.device}...")
-        self._load_resources()
-
-    def _load_resources(self):
-        """Loads and configures the pyFAI physics objects and the PyTorch model."""
-        try:
-            self.calibrant = CALIBRANT_FACTORY(self.calibrant_alias)
-            self.calibrant.wavelength = self.wavelength
-            self.detector = detector_factory(self.detector_alias)
-        except KeyError as e:
-            raise ValueError(f"Unknown detector or calibrant: {e}")
-
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        secondary_wavelength = self.wavelength * (
+            recipe.SECONDARY_WAVELENGTH_M / recipe.PRIMARY_WAVELENGTH_M
+        )
+        self.refiner = HybridRefiner(
+            self.detector,
+            recipe.CALIBRANT_NAME,
+            self.wavelength,
+            secondary_wavelength,
+            priors=RefinementPriors(
+                translation_lower=recipe.TRANSLATION_LOWER,
+                translation_upper=recipe.TRANSLATION_UPPER,
+                mean_tilts=recipe.MEAN_TILTS,
+            ),
+        )
+        self.last_refinement_diagnostics: dict | None = None
         self.model = self._build_model()
-        self._load_weights()
-        self.model.to(self.device)
-        self.model.eval()
+        self._load_weights(model_src)
+        self.model.to(self.device).eval()
 
-    def _build_model(self) -> nn.Module:
-        """Instantiates the Swin Transformer architecture."""
-        print(f"Building architecture: {self.backbone}")
-        
+    def _build_model(self) -> MaximaSwin:
+        config = SwinConfig(
+            image_size=self.image_size,
+            patch_size=4,
+            num_channels=3,
+            embed_dim=128,
+            depths=[2, 2, 18, 2],
+            num_heads=[4, 8, 16, 32],
+            window_size=12,
+            mlp_ratio=4.0,
+            qkv_bias=True,
+            hidden_dropout_prob=0.0,
+            attention_probs_dropout_prob=0.0,
+            drop_path_rate=0.1,
+            hidden_act="gelu",
+            use_absolute_embeddings=False,
+            initializer_range=0.02,
+            layer_norm_eps=1e-5,
+        )
         head = nn.Sequential(
-            nn.Linear(self.hidden_dim, 512),
+            nn.Linear(recipe.BACKBONE_FEATURES, 512),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(512, 6)
+            nn.Linear(512, 6),
         )
+        return MaximaSwin(SwinModel(config), head)
 
-        config = SwinConfig.from_pretrained(self.backbone)
-        config.image_size = self.image_size
-        backbone = SwinModel.from_pretrained(self.backbone, config=config, ignore_mismatched_sizes=True)
-        
-        return MaximaSwin(backbone, head)
-
-    def _load_weights(self):
-        """Loads state dict from the checkpoint file or stream."""
-        if isinstance(self.model_src, str):
-            print(f"Loading weights from: {self.model_src}")
+    def _load_weights(self, model_src: str | PathLike[str] | BinaryIO) -> None:
+        if isinstance(model_src, (str, PathLike)):
+            with open(model_src, "rb") as stream:
+                state = _load_checkpoint(stream)
         else:
-            print("Loading weights directly from in-memory stream")
-            self.model_src.seek(0)
-            
-        state_dict = torch.load(self.model_src, map_location='cpu')
-        try:
-            self.model.load_state_dict(state_dict, strict=True)
-        except RuntimeError as e:
-            print(f"Strict load failed ({e}). Check checkpoint format.")
+            state = _load_checkpoint(model_src)
+        self.model.load_state_dict(state, strict=True)
 
-    def _image_to_tensor(self, image: np.ndarray) -> torch.Tensor:
-        """Preprocesses numpy image into a normalized tensor."""
-        image = np.log1p(image)
-        img_min, img_max = image.min(), image.max() 
-        image = (image - img_min) / (img_max - img_min) if img_max > img_min else np.zeros_like(image) 
-        
-        tensor = torch.from_numpy(image).unsqueeze(0).repeat(3, 1, 1).float() # make it 3-channel
+    def _infer(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        tensor = _preprocess(image, mask, self.image_size).to(self.device)
+        with torch.inference_mode():
+            normalized = self.model(tensor)[0, :5]
+            centers = normalized.new_tensor(recipe.PARAMETER_CENTERS)
+            scales = normalized.new_tensor(recipe.PARAMETER_SCALES)
+            physical = (normalized * scales + centers).cpu().numpy()
+        return np.append(physical.astype(float), 0.0)
 
-        _, h, w = tensor.shape
-        pad_h, pad_w = (max(h, w) - h) // 2, (max(h, w) - w) // 2
-        
-        transform = transforms.Compose([
-            transforms.Pad((pad_w, pad_h)), 
-            transforms.Resize((self.image_size, self.image_size), antialias=True), 
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # normalize to ImageNet stats
-        ])
-        return transform(tensor).unsqueeze(0)
-
-    def calibrate(self, image: np.uint32, output_path: str = None) -> Geometry:
-        """
-        Runs the full calibration pipeline.
-
-        Args:
-            image (np.ndarray): Input diffraction image (e.g., .tif, .cbf).
-
-            output_path (str, optional): Path to save the final geometry as a .poni file.
-
-        Returns:
-            Geometry: The final refined pyFAI Geometry object.
-        """
-        # run inference
-        # image = image[0]
-        image = image.astype(np.float32)
-        tensor = self._image_to_tensor(image).to(self.device)
-        with torch.no_grad():
-            pred = self.model(tensor).cpu().numpy().flatten()
-        
-        initial_geometry = Geometry(
-            dist=pred[0], poni1=pred[1], poni2=pred[2],
-            rot1=pred[3], rot2=pred[4], rot3=pred[5],
-            wavelength=self.wavelength, detector=self.detector
+    def calibrate(
+        self,
+        image: np.ndarray,
+        output_path: str | PathLike[str] | None = None,
+        *,
+        factory_mask: np.ndarray | None = None,
+    ) -> Geometry:
+        """Infer and refine one frame, writing only geometry that passed support checks."""
+        self.last_refinement_diagnostics = None
+        image = np.asarray(image)
+        mask = _effective_mask(image, factory_mask)
+        seed = self._infer(image, mask)
+        refinement = self.refiner.refine(image.astype(np.float32, copy=False), mask, seed)
+        self.last_refinement_diagnostics = refinement.diagnostics
+        geometry = Geometry(
+            **dict(zip(GEOMETRY_PARAMETERS, map(float, refinement.parameters), strict=True)),
+            detector=self.detector,
+            wavelength=self.wavelength,
         )
+        if output_path is not None:
+            with Path(output_path).open("w", encoding="utf-8") as stream:
+                PoniFile(geometry).write(stream)
+        return geometry
 
-        # geometric refinement
-        clipped_image = np.clip(image, 30.0, 300.0) # clip bg noise and zingers
-        optimizer = PeakOptimizer(clipped_image, initial_geometry, self.calibrant)
-        final_geometry = optimizer.optimize() or initial_geometry # returns initial geometry if optimization fails
-        
-        if output_path:
-            final_geometry.save(output_path)
-            
-        return final_geometry
 
 def calibrate_image(
-    image_path: str,
-    model_path: str,
-    output_path: str = None,
-    calibrant: str = "alpha_Al2O3",
-    detector: str = "Eiger2Cdte_1M",
-    energy: float = None,  
-    wavelength: float = None,
-    image_size: int = 1056,
-    backbone: str = "microsoft/swin-base-patch4-window12-384-in22k",
-    hidden_dim: int = 1024,
-    device: str = None,
+    image_path: str | PathLike[str],
+    model_path: str | PathLike[str],
+    output_path: str | PathLike[str] | None = None,
+    calibrant: str = recipe.CALIBRANT_NAME,
+    detector: str = recipe.DETECTOR_NAME,
+    energy: float | None = None,
+    wavelength: float | None = None,
+    image_size: int = recipe.IMAGE_SIZE,
+    backbone: str = recipe.BACKBONE_NAME,
+    hidden_dim: int = recipe.BACKBONE_FEATURES,
+    device: str | None = None,
+    *,
+    factory_mask: np.ndarray | None = None,
 ) -> Geometry:
-    """
-    Convenience wrapper for asset usage.
-    """
-    wavelength = resolve_wavelength(energy=energy, wavelength=wavelength)
+    """Calibrate a Fabio-readable frame from a local file."""
+    import fabio
 
-    calibrator = MaximaCalibrator(
-        model_path=model_path,
-        calibrant=calibrant,
-        detector=detector,
-        wavelength=wavelength,
-        image_size=image_size,
-        backbone=backbone,
-        hidden_dim=hidden_dim,
-        device=device,
-    )
-    return calibrator.calibrate(image_path=image_path, output_path=output_path)
+    with fabio.open(str(image_path)) as image:
+        calibrator = MaximaCalibrator(
+            model_src=model_path,
+            calibrant=calibrant,
+            detector=detector,
+            energy=energy,
+            wavelength=wavelength,
+            image_size=image_size,
+            backbone=backbone,
+            hidden_dim=hidden_dim,
+            device=device,
+        )
+        return calibrator.calibrate(image.data, output_path, factory_mask=factory_mask)
 
 
-__all__ = [
-    "MaximaCalibrator",
-    "calibrate_image",
-    "PeakOptimizer",
-]
+__all__ = ["MaximaCalibrator", "calibrate_image"]
