@@ -347,14 +347,16 @@ class HybridRefiner:
         signal: np.ndarray,
         mask: np.ndarray,
         points: np.ndarray,
-    ) -> tuple[np.ndarray, list[_StripSupport]]:
+    ) -> tuple[np.ndarray, list[_StripSupport], _StripSupport]:
+        """Fit strip centroids twice, then measure support at the geometry being returned."""
         parameters = seed
         support = []
         for _ in range(2):
             centroids, targets, strips = self._strip_centroids(signal, mask, parameters, points)
             parameters = self._fit(parameters, centroids, targets, _FIT_PARAMETERS)
             support.append(strips)
-        return parameters, support
+        _, _, final = self._strip_centroids(signal, mask, parameters, points)
+        return parameters, support, final
 
     def _make_template_rays(self) -> np.ndarray:
         expected = np.c_[self._primary_angles[_FAMILIES], self._secondary_angles[_FAMILIES]]
@@ -483,21 +485,24 @@ class HybridRefiner:
                 parameters, points, _FAMILIES[:1], 0.8, _TRANSLATIONS, doublet=False
             )
         parameters = self._fit_doublet(parameters, points, _DOUBLET_GATES_DEG)
-        parameters, support = self._centroid_passes(parameters, centroid_signal, mask, points)
-        supported = all(strips.sufficient for strips in support)
+        parameters, support, final = self._centroid_passes(parameters, centroid_signal, mask, points)
         diagnostics = {
             "detected_peaks": len(points),
             "initial_centroid_passes": [strips.as_dict() for strips in support],
-            "rescue_attempted": not supported,
+            "initial_support": final.as_dict(),
+            "rescue_attempted": not final.sufficient,
         }
-        if not supported:
+        if not final.sufficient:
             try:
                 parameters, diagnostics["rescue"] = self._rescue(seed, signal, mask, points)
-                parameters, support = self._centroid_passes(parameters, centroid_signal, mask, points)
+                parameters, support, final = self._centroid_passes(
+                    parameters, centroid_signal, mask, points
+                )
             except RefinementError as exc:
                 diagnostics["rescue_failure"] = str(exc)
         diagnostics["centroid_passes"] = [strips.as_dict() for strips in support]
-        if not all(strips.sufficient for strips in support) or not np.isfinite(parameters).all():
+        diagnostics["final_support"] = final.as_dict()
+        if not final.sufficient or not np.isfinite(parameters).all():
             raise RefinementError(
                 f"Hybrid calibration failed the ring-support checks: {diagnostics}", diagnostics
             )
