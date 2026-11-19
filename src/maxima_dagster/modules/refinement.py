@@ -475,7 +475,8 @@ class HybridRefiner:
 
         signal = _filtered_signal(image, mask, dtype=np.float32)
         points = _extract_peaks(signal, mask).astype(float)
-        centroid_signal = _filtered_signal(image, mask, dtype=np.float64)
+        # Strips subtract their own linear baseline; high-pass filtering would distort the doublet
+        centroid_signal = np.where(mask, 0, image).astype(np.float64)
         parameters = seed
         for _ in range(3):
             parameters = self._assign_and_fit(
