@@ -1,7 +1,7 @@
 [project]
 name = "maxima_dagster"
 requires-python = ">=3.11,<3.15"
-version = "2026.6.1"
+version = "2026.11.19"
 dependencies = [
     "dagster",
     "numpy==2.4.1",
