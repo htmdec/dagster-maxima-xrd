@@ -13,7 +13,7 @@ pytest.importorskip("pyFAI")
 pytest.importorskip("skimage")
 pytest.importorskip("scipy")
 
-from maxima_dagster.modules import calibrate
+from maxima_dagster.modules import calibrate, masking
 from maxima_dagster.modules.refinement import RefinementError
 
 
@@ -45,7 +45,7 @@ def test_resolve_wavelength_rejects_invalid_inputs(energy, wavelength):
 def test_preprocess_excludes_both_masks_and_pads_bottom():
     image = np.array([[0, 1000, 15], [1, 2**32 - 1, 7]], dtype=np.uint32)
     factory_mask = np.array([[0, 2, 0], [0, 0, 0]], dtype=np.uint32)
-    mask = calibrate._effective_mask(image, factory_mask)
+    mask = masking.effective_mask(image, factory_mask)
     actual = calibrate._preprocess(image, mask, image_size=3)
 
     log_counts = np.log1p(np.array([0, 15, 1, 7], dtype=np.float32))

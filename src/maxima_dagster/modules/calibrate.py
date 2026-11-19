@@ -18,13 +18,13 @@ from pyFAI.io.ponifile import PoniFile
 from transformers import SwinConfig, SwinModel
 
 from . import calibration_recipe as recipe
+from .masking import effective_mask
 from .refinement import HybridRefiner, RefinementPriors
 
 
 HC_KEV_M = 1.2398419843320026e-9
 DEFAULT_WAVELENGTH_M = recipe.PRIMARY_WAVELENGTH_M
 GEOMETRY_PARAMETERS = ("dist", "poni1", "poni2", "rot1", "rot2", "rot3")
-_UINT32_SENTINEL = np.iinfo(np.uint32).max
 
 
 def resolve_wavelength(*, energy: float | None, wavelength: float | None) -> float:
@@ -65,22 +65,6 @@ def _load_checkpoint(stream: BinaryIO) -> dict[str, torch.Tensor]:
         )
     stream.seek(0)
     return torch.load(stream, map_location="cpu", weights_only=True)
-
-
-def _effective_mask(image: np.ndarray, factory_mask: np.ndarray | None) -> np.ndarray:
-    """Combine the image's invalid counts with a detector mask supplied by the caller."""
-    if image.ndim != 2 or image.size == 0 or image.dtype.kind not in "iuf":
-        raise ValueError("Expected a nonempty 2D detector frame with numeric counts")
-    invalid = ~np.isfinite(image) | (image < 0)
-    bounds = np.finfo(image.dtype) if image.dtype.kind == "f" else np.iinfo(image.dtype)
-    if bounds.max >= _UINT32_SENTINEL:
-        invalid |= image >= image.dtype.type(_UINT32_SENTINEL)
-    if factory_mask is not None:
-        factory_mask = np.asarray(factory_mask, dtype=bool)
-        if factory_mask.shape != image.shape:
-            raise ValueError(f"Detector frame shape {image.shape} does not match factory mask shape {factory_mask.shape}")
-        invalid |= factory_mask
-    return invalid
 
 
 def _preprocess(image: np.ndarray, mask: np.ndarray, image_size: int) -> torch.Tensor:
@@ -211,7 +195,7 @@ class MaximaCalibrator:
         """Infer and refine one frame, writing only geometry that passed support checks."""
         self.last_refinement_diagnostics = None
         image = np.asarray(image)
-        mask = _effective_mask(image, factory_mask)
+        mask = effective_mask(image, factory_mask)
         seed = self._infer(image, mask)
         refinement = self.refiner.refine(image.astype(np.float32, copy=False), mask, seed)
         self.last_refinement_diagnostics = refinement.diagnostics
